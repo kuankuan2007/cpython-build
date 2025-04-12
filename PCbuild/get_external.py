@@ -7,41 +7,62 @@ import sys
 import time
 import zipfile
 from urllib.request import urlretrieve
+from urllib import request
+
+proxy = request.ProxyHandler(
+    {"https": "http://127.0.0.1:7890", "http": "http://127.0.0.1:7890"}
+)
 
 
-def fetch_zip(commit_hash, zip_dir, *, org='python', binary=False, verbose):
-    repo = f'cpython-{"bin" if binary else "source"}-deps'
-    url = f'https://github.com/{org}/{repo}/archive/{commit_hash}.zip'
-    reporthook = None
-    if verbose:
-        reporthook = print
-    zip_dir.mkdir(parents=True, exist_ok=True)
-    filename, headers = urlretrieve(
-        url,
-        zip_dir / f'{commit_hash}.zip',
-        reporthook=reporthook,
-    )
-    return filename
-
+def fetch_zip(commit_hash, zip_dir, *, org="python", binary=False, verbose):
+    try:
+        repo = f'cpython-{"bin" if binary else "source"}-deps'
+        url = f"https://github.com/{org}/{repo}/archive/{commit_hash}.zip"
+        print(f"Downloading {url}", file=sys.stderr)
+        request.install_opener(request.build_opener(proxy))
+        reporthook = None
+        if verbose:
+            reporthook = print
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        filename, headers = urlretrieve(
+            url,
+            zip_dir / f"{commit_hash}.zip",
+            reporthook=reporthook,
+        )
+        return filename
+    except Exception as e:
+        print(f"ERROR: Failed to fetch {url}: {e}\nRetrying...\n", file=sys.stderr)
+        return fetch_zip(commit_hash, zip_dir, org=org, binary=binary, verbose=verbose)
 
 def extract_zip(externals_dir, zip_path):
     with zipfile.ZipFile(os.fspath(zip_path)) as zf:
         zf.extractall(os.fspath(externals_dir))
-        return externals_dir / zf.namelist()[0].split('/')[0]
+        return externals_dir / zf.namelist()[0].split("/")[0]
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('-v', '--verbose', action='store_true')
-    p.add_argument('-b', '--binary', action='store_true',
-                   help='Is the dependency in the binary repo?')
-    p.add_argument('-O', '--organization',
-                   help='Organization owning the deps repos', default='python')
-    p.add_argument('-e', '--externals-dir', type=pathlib.Path,
-                   help='Directory in which to store dependencies',
-                   default=pathlib.Path(__file__).parent.parent / 'externals')
-    p.add_argument('tag',
-                   help='tag of the dependency')
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument(
+        "-b",
+        "--binary",
+        action="store_true",
+        help="Is the dependency in the binary repo?",
+    )
+    p.add_argument(
+        "-O",
+        "--organization",
+        help="Organization owning the deps repos",
+        default="python",
+    )
+    p.add_argument(
+        "-e",
+        "--externals-dir",
+        type=pathlib.Path,
+        help="Directory in which to store dependencies",
+        default=pathlib.Path(__file__).parent.parent / "externals",
+    )
+    p.add_argument("tag", help="tag of the dependency")
     return p.parse_args()
 
 
@@ -49,7 +70,7 @@ def main():
     args = parse_args()
     zip_path = fetch_zip(
         args.tag,
-        args.externals_dir / 'zips',
+        args.externals_dir / "zips",
         org=args.organization,
         binary=args.binary,
         verbose=args.verbose,
@@ -73,5 +94,5 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
