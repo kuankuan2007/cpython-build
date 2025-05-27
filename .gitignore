@@ -144,3 +144,4 @@ Tools/ssl/win32
 /Modules/Setup.stdlib
 /Python/deepfreeze/
 /Python/frozen_modules/ 
+outputs/
