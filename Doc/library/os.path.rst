@@ -345,15 +345,40 @@ the :mod:`glob` module.)
       Accepts a :term:`path-like object`.
 
 
-.. function:: realpath(path)
+.. function:: realpath(path, *, strict=False)
 
    Return the canonical path of the specified filename, eliminating any symbolic
    links encountered in the path (if they are supported by the operating
    system).
 
+   By default, the path is evaluated up to the first component that does not
+   exist, is a symlink loop, or whose evaluation raises :exc:`OSError`.
+   All such components are appended unchanged to the existing part of the path.
+
+   Some errors that are handled this way include "access denied", "not a
+   directory", or "bad argument to internal function". Thus, the
+   resulting path may be missing or inaccessible, may still contain
+   links or loops, and may traverse non-directories.
+
+   This behavior can be modified by keyword arguments:
+
+   If *strict* is ``True``, the first error encountered when evaluating the path is
+   re-raised.
+   In particular, :exc:`FileNotFoundError` is raised if *path* does not exist,
+   or another :exc:`OSError` if it is otherwise inaccessible.
+
+   If *strict* is :py:data:`os.path.ALLOW_MISSING`, errors other than
+   :exc:`FileNotFoundError` are re-raised (as with ``strict=True``).
+   Thus, the returned path will not contain any symbolic links, but the named
+   file and some of its parent directories may be missing.
+
    .. note::
-      When symbolic link cycles occur, the returned path will be one member of
-      the cycle, but no guarantee is made about which member that will be.
+      This function emulates the operating system's procedure for making a path
+      canonical, which differs slightly between Windows and UNIX with respect
+      to how links and subsequent path components interact.
+
+      Operating system APIs make paths canonical as needed, so it's not
+      normally necessary to call this function.
 
    .. versionchanged:: 3.6
       Accepts a :term:`path-like object`.
@@ -361,6 +386,18 @@ the :mod:`glob` module.)
    .. versionchanged:: 3.8
       Symbolic links and junctions are now resolved on Windows.
 
+   .. versionchanged:: 3.9.23
+      The *strict* parameter was added.
+
+   .. versionchanged:: next
+      The :py:data:`~os.path.ALLOW_MISSING` value for the *strict* parameter
+      was added.
+
+.. data:: ALLOW_MISSING
+
+   Special value used for the *strict* argument in :func:`realpath`.
+
+   .. versionadded:: next
 
 .. function:: relpath(path, start=os.curdir)
 
