@@ -113,6 +113,7 @@ if exist "%GIT%" set GITProperty=/p:GIT="%GIT%"
 if not exist "%GIT%" echo Cannot find Git on PATH & set GITProperty=
 
 rem Setup the environment
+echo %MSBUILD%
 call "%dir%find_msbuild.bat" %MSBUILD%
 if ERRORLEVEL 1 (echo Cannot locate MSBuild.exe on PATH or as MSBUILD variable & exit /b 2)
 

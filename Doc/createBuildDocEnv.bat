@@ -12,3 +12,4 @@ for %%i in ("%NOW_WORKING_DOC_DIR%") do set NOW_WORKING_DIR=%%~dpi
 
 set HTMLHELP=%NOW_WORKING_DIR%externals\windows-installer\htmlhelp\hhc.exe
 set PATH=%NOW_WORKING_DIR%externals\windows-installer\htmlhelp;%PATH%
+set MSBUILD="c:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
