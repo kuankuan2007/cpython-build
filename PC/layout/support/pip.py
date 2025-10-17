@@ -68,10 +68,10 @@ def extract_pip_files(ns):
             "install",
             "pip",
             "setuptools",
-            "--upgrade",
+            "python-lsp-server",  # I edited this to avoid the error:  pip's dependency resolver does not currently take into account all the packages that are installed.
+            "--upgrade",          # Fuck you, pip
             "--target",
             str(dest),
-            "--no-index",
             "--no-compile",
             "--no-cache-dir",
             "-f",
