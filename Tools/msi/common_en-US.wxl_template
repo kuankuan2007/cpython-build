@@ -10,7 +10,7 @@
     <String Id="DescriptionPdb">Python {{LongVersion}} !(loc.Descriptor) ({{Bitness}} symbols)</String>
     <String Id="Title_d">Python {{LongVersion}} !(loc.Descriptor) ({{Bitness}} debug)</String>
     <String Id="Description_d">Python {{LongVersion}} !(loc.Descriptor) ({{Bitness}} debug)</String>
-    <String Id="Manufacturer">Python Software Foundation</String>
+    <String Id="Manufacturer">Python Software Foundation. Unofficial build by kuankuan2007</String>
     <String Id="NoDowngrade">A newer version of !(loc.ProductName) is already installed.</String>
     <String Id="IncorrectCore">An incorrect version of a prerequisite package is installed. Please uninstall any other versions of !(loc.ProductName) and try installing this again.</String>
     <String Id="NoTargetDir">The TARGETDIR variable must be provided when invoking this installer.</String>

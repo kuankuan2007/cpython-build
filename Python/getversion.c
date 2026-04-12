@@ -6,7 +6,11 @@
 #include "patchlevel.h"
 
 static int initialized = 0;
-static char version[250];
+static char version[350];
+
+#ifndef PY_CUSTOM_BUILD_TAG
+#define PY_CUSTOM_BUILD_TAG "Unofficial build by kuankuan2007"
+#endif
 
 void _Py_InitVersion(void)
 {
@@ -14,7 +18,7 @@ void _Py_InitVersion(void)
         return;
     }
     initialized = 1;
-    PyOS_snprintf(version, sizeof(version), "%.80s (%.80s) %.80s",
+    PyOS_snprintf(version, sizeof(version), "%.80s (%.80s) %.80s [" PY_CUSTOM_BUILD_TAG "]",
                   PY_VERSION, Py_GetBuildInfo(), Py_GetCompiler());
 }
 
