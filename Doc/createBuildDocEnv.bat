@@ -1,7 +1,7 @@
 
-set PYTHON=J:\production\temp\cpython\venv\Scripts\python.exe
+set PYTHON=J:\production\temp\cpython\venv-11\Scripts\python.exe
 
-set SPHINXBUILD=J:\cpython\venv\Scripts\sphinx-build.exe
+set SPHINXBUILD=J:\cpython\venv-11\Scripts\sphinx-build.exe
 set SCRIPT_DIR=%~dp0
 set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
 
