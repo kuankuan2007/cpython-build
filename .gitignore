@@ -146,4 +146,4 @@ Tools/ssl/win32
 /Python/deepfreeze/
 /Python/frozen_modules/
 outputs/
-/venv/
+/venv*/

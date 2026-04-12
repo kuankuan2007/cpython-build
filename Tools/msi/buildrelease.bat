@@ -95,7 +95,7 @@ set _DLLTOOL_PATH=
 :skipdlltoolsearch
 
 if defined BUILDX86 (
-    call :build x86
+    call :build x86 "%PGO%"
     if errorlevel 1 exit /B %ERRORLEVEL%
 )
 
@@ -116,7 +116,7 @@ exit /B 0
 @echo off
 
 if "%1" EQU "x86" (
-    set PGO=
+    set PGO=%~2
     set BUILD=%Py_OutDir%win32\
     set BUILD_PLAT=Win32
     set OUTDIR_PLAT=win32
