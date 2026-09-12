@@ -126,7 +126,7 @@ check_locale_name_all(const char *locale)
 _locale.setlocale
 
     category: int
-    locale: str(accept={str, NoneType}) = NULL
+    locale: str(accept={str, NoneType}) = None
     /
 
 Activates/queries locale processing.
@@ -134,7 +134,7 @@ Activates/queries locale processing.
 
 static PyObject *
 _locale_setlocale_impl(PyObject *module, int category, const char *locale)
-/*[clinic end generated code: output=a0e777ae5d2ff117 input=dbe18f1d66c57a6a]*/
+/*[clinic end generated code: output=a0e777ae5d2ff117 input=b53449b63407179b]*/
 {
     char *result;
     PyObject *result_object;
@@ -443,6 +443,7 @@ _locale_strxfrm_impl(PyObject *module, PyObject *str)
 {
     Py_ssize_t n1;
     wchar_t *s = NULL, *buf = NULL;
+    wchar_t dummy[1];
     size_t n2;
     PyObject *result = NULL;
 
@@ -455,33 +456,25 @@ _locale_strxfrm_impl(PyObject *module, PyObject *str)
         goto exit;
     }
 
-    /* assume no change in size, first */
-    n1 = n1 + 1;
-    buf = PyMem_New(wchar_t, n1);
-    if (!buf) {
-        PyErr_NoMemory();
-        goto exit;
-    }
     errno = 0;
-    n2 = wcsxfrm(buf, s, n1);
+    /* Query the size with a real one-element buffer: DragonFly BSD's
+       wcsxfrm() crashes when the destination is NULL or the size is 0. */
+    n2 = wcsxfrm(dummy, s, 1);
     if (errno && errno != ERANGE) {
         PyErr_SetFromErrno(PyExc_OSError);
         goto exit;
     }
-    if (n2 >= (size_t)n1) {
-        /* more space needed */
-        wchar_t * new_buf = PyMem_Realloc(buf, (n2+1)*sizeof(wchar_t));
-        if (!new_buf) {
-            PyErr_NoMemory();
-            goto exit;
-        }
-        buf = new_buf;
-        errno = 0;
-        n2 = wcsxfrm(buf, s, n2+1);
-        if (errno) {
-            PyErr_SetFromErrno(PyExc_OSError);
-            goto exit;
-        }
+    buf = PyMem_New(wchar_t, n2+1);
+    if (!buf) {
+        PyErr_NoMemory();
+        goto exit;
+    }
+
+    errno = 0;
+    n2 = wcsxfrm(buf, s, n2+1);
+    if (errno) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        goto exit;
     }
     /* The result is just a sequence of integers, they are not necessary
        Unicode code points, so PyUnicode_FromWideChar() cannot be used
@@ -565,19 +558,7 @@ _locale__getdefaultlocale_impl(PyObject *module)
             return Py_BuildValue("ss", locale, encoding);
     }
 
-    /* If we end up here, this windows version didn't know about
-       ISO639/ISO3166 names (it's probably Windows 95).  Return the
-       Windows language identifier instead (a hexadecimal number) */
-
-    locale[0] = '0';
-    locale[1] = 'x';
-    if (GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_IDEFAULTLANGUAGE,
-                      locale+2, sizeof(locale)-2)) {
-        return Py_BuildValue("ss", locale, encoding);
-    }
-
     /* cannot determine the language code (very unlikely) */
-    Py_INCREF(Py_None);
     return Py_BuildValue("Os", Py_None, encoding);
 }
 #endif
@@ -1074,6 +1055,7 @@ _locale_exec(PyObject *module)
 }
 
 static struct PyModuleDef_Slot _locale_slots[] = {
+    _Py_ABI_SLOT,
     {Py_mod_exec, _locale_exec},
     {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
     {Py_mod_gil, Py_MOD_GIL_NOT_USED},

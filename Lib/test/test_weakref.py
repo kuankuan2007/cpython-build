@@ -1019,7 +1019,7 @@ class ReferencesTestCase(TestBase):
         del x
         support.gc_collect()
 
-    @support.cpython_only
+    @support.nomemtest
     def test_no_memory_when_clearing(self):
         # gh-118331: Make sure we do not raise an exception from the destructor
         # when clearing weakrefs if allocating the intermediate tuple fails.
@@ -1815,6 +1815,11 @@ class MappingTestCase(TestBase):
     def test_weak_keyed_dict_update(self):
         self.check_update(weakref.WeakKeyDictionary,
                           {C(): 1, C(): 2, C(): 3})
+        d = weakref.WeakKeyDictionary()
+        msg = ("Keyword arguments are not supported: "
+               "cannot create weak reference to 'str' object")
+        with self.assertRaisesRegex(TypeError, msg):
+            d.update(k='v')
 
     def test_weak_keyed_delitem(self):
         d = weakref.WeakKeyDictionary()
