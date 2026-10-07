@@ -8,7 +8,7 @@ PYTHON       = python3
 VENVDIR      = ./venv
 SPHINXBUILD  = PATH=$(VENVDIR)/bin:$$PATH sphinx-build
 BLURB        = PATH=$(VENVDIR)/bin:$$PATH blurb
-JOBS         = auto
+JOBS         = 1
 PAPER        =
 SOURCES      =
 DISTVERSION  = $(shell $(PYTHON) tools/extensions/patchlevel.py)
@@ -57,7 +57,7 @@ build:
 	@if [ -f  ../Misc/NEWS ] ; then \
 		echo "Using existing Misc/NEWS file"; \
 		cp ../Misc/NEWS build/NEWS; \
-	elif $(BLURB) help >/dev/null 2>&1 && $(SPHINXBUILD) --version >/dev/null 2>&1; then \
+	elif $(BLURB) --version && $(SPHINXBUILD) --version ; then \
 		if [ -d ../Misc/NEWS.d ]; then \
 			echo "Building NEWS from Misc/NEWS.d with blurb"; \
 			$(BLURB) merge -f build/NEWS; \
@@ -201,6 +201,7 @@ dist:
 .PHONY: dist-html
 dist-html:
 	# archive the HTML
+	mkdir -p dist
 	make html
 	cp -pPR build/html dist/python-$(DISTVERSION)-docs-html
 	tar -C dist -cf dist/python-$(DISTVERSION)-docs-html.tar python-$(DISTVERSION)-docs-html
@@ -212,6 +213,7 @@ dist-html:
 .PHONY: dist-text
 dist-text:
 	# archive the text build
+	mkdir -p dist
 	make text
 	cp -pPR build/text dist/python-$(DISTVERSION)-docs-text
 	tar -C dist -cf dist/python-$(DISTVERSION)-docs-text.tar python-$(DISTVERSION)-docs-text
@@ -223,6 +225,7 @@ dist-text:
 .PHONY: dist-pdf
 dist-pdf:
 	# archive the A4 latex
+	mkdir -p dist
 	rm -rf build/latex
 	make latex PAPER=a4
 	-sed -i 's/makeindex/makeindex -q/' build/latex/Makefile
@@ -241,6 +244,7 @@ dist-pdf:
 .PHONY: dist-epub
 dist-epub:
 	# copy the epub build
+	mkdir -p dist
 	rm -rf build/epub
 	make epub
 	cp -pPR build/epub/Python.epub dist/python-$(DISTVERSION)-docs.epub
@@ -248,6 +252,7 @@ dist-epub:
 .PHONY: dist-texinfo
 dist-texinfo:
 	# archive the texinfo build
+	mkdir -p dist
 	rm -rf build/texinfo
 	make texinfo
 	make info --directory=build/texinfo
