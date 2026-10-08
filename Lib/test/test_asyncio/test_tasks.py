@@ -87,8 +87,10 @@ class BaseTaskTests:
     Task = None
     Future = None
 
-    def new_task(self, loop, coro, name='TestTask', context=None):
-        return self.__class__.Task(coro, loop=loop, name=name, context=context)
+    def new_task(self, loop, coro, name='TestTask', context=None,
+                 eager_start=None):
+        return self.__class__.Task(coro, loop=loop, name=name, context=context,
+                                   eager_start=eager_start)
 
     def new_future(self, loop):
         return self.__class__.Future(loop=loop)
@@ -2518,6 +2520,68 @@ class BaseTaskTests:
         finally:
             loop.close()
 
+    def test_context_not_a_context(self):
+        # gh-157301
+        async def coro():
+            pass
+
+        loop = asyncio.new_event_loop()
+        c = coro()
+        try:
+            with self.assertRaises(TypeError):
+                self.new_task(loop, c, context='not a context')
+        finally:
+            c.close()
+            loop.close()
+
+    def test_context_not_a_context_leaves_loop_usable(self):
+        # gh-157301
+        async def coro():
+            pass
+
+        async def main():
+            c = coro()
+            try:
+                with self.assertRaises(TypeError):
+                    self.new_task(loop, c, context='not a context',
+                                  eager_start=True)
+            finally:
+                c.close()
+            await asyncio.sleep(0)
+
+        loop = asyncio.new_event_loop()
+        loop.call_later(support.SHORT_TIMEOUT, loop.stop)
+        try:
+            loop.run_until_complete(self.new_task(loop, main()))
+        finally:
+            loop.close()
+
+    def test_context_already_entered_leaves_loop_usable(self):
+        # gh-157301
+        async def coro():
+            pass
+
+        async def main():
+            ctx = contextvars.copy_context()
+
+            def inside():
+                c = coro()
+                try:
+                    with self.assertRaises(RuntimeError):
+                        self.new_task(loop, c, context=ctx, eager_start=True)
+                finally:
+                    c.close()
+
+            ctx.run(inside)
+            await asyncio.sleep(0)
+
+        loop = asyncio.new_event_loop()
+        loop.call_later(support.SHORT_TIMEOUT, loop.stop)
+        try:
+            loop.run_until_complete(self.new_task(loop, main()))
+        finally:
+            loop.close()
+
     def test_context_2(self):
         cvar = contextvars.ContextVar('cvar', default='nope')
 
@@ -2690,7 +2754,7 @@ class BaseTaskTests:
             def __str__(self):
                 raise RuntimeError("break")
 
-        obj = object()
+        obj = contextvars.copy_context()
         initial_refcount = sys.getrefcount(obj)
 
         coro = coroutine_function()
@@ -2847,6 +2911,16 @@ class CTask_CFuture_Tests(BaseTaskTests, SetMethodsTest,
         self.loop.run_until_complete(task)
         with self.assertRaises(AttributeError):
             del task._log_destroy_pending
+
+    def test_get_context_uninitialized_segfault(self):
+        # https://github.com/python/cpython/issues/154871
+
+        class UninitializedTask(self.Task):
+            def __init__(self, *args, **kwargs):
+                pass
+
+        task = UninitializedTask()
+        self.assertIsNone(task.get_context())
 
 
 @unittest.skipUnless(hasattr(futures, '_CFuture') and
@@ -3551,6 +3625,30 @@ class RunCoroutineThreadsafeTests(test_utils.TestCase):
         self.assertEqual(len(callback.call_args_list), 1)
         (loop, context), kwargs = callback.call_args
         self.assertEqual(context['exception'], exc_context.exception)
+
+    def test_run_coroutine_threadsafe_and_cancel(self):
+        task = None
+        thread_future = None
+        # Use a custom task factory to capture the created Task
+        def task_factory(loop, coro):
+            nonlocal task
+            task = asyncio.Task(coro, loop=loop)
+            return task
+
+        self.addCleanup(self.loop.set_task_factory,
+                        self.loop.get_task_factory())
+
+        async def target():
+            nonlocal thread_future
+            self.loop.set_task_factory(task_factory)
+            thread_future = asyncio.run_coroutine_threadsafe(asyncio.sleep(10), self.loop)
+            await asyncio.sleep(0)
+
+            thread_future.cancel()
+
+        self.loop.run_until_complete(target())
+        self.assertTrue(task.cancelled())
+        self.assertTrue(thread_future.cancelled())
 
 
 class SleepTests(test_utils.TestCase):

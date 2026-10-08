@@ -961,6 +961,9 @@
                 PyFunctionObject *func = (PyFunctionObject *)callable;
                 PyCodeObject *code = (PyCodeObject *)func->func_code;
                 DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize), CALL);
+            }
+            // _CHECK_RECURSION_REMAINING
+            {
                 DEOPT_IF(tstate->py_recursion_remaining <= 1, CALL);
             }
             // _INIT_CALL_PY_EXACT_ARGS
@@ -1020,6 +1023,10 @@
             // _CHECK_PEP_523
             {
                 DEOPT_IF(tstate->interp->eval_frame, CALL);
+            }
+            // _CHECK_RECURSION_REMAINING
+            {
+                DEOPT_IF(tstate->py_recursion_remaining <= 1, CALL);
             }
             // _CHECK_METHOD_VERSION
             null = stack_pointer[-1 - oparg];
@@ -1890,6 +1897,9 @@
                 PyFunctionObject *func = (PyFunctionObject *)callable;
                 PyCodeObject *code = (PyCodeObject *)func->func_code;
                 DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize), CALL);
+            }
+            // _CHECK_RECURSION_REMAINING
+            {
                 DEOPT_IF(tstate->py_recursion_remaining <= 1, CALL);
             }
             // _INIT_CALL_PY_EXACT_ARGS
@@ -1954,6 +1964,10 @@
                 DEOPT_IF(!PyFunction_Check(callable), CALL);
                 PyFunctionObject *func = (PyFunctionObject *)callable;
                 DEOPT_IF(func->func_version != func_version, CALL);
+            }
+            // _CHECK_RECURSION_REMAINING
+            {
+                DEOPT_IF(tstate->py_recursion_remaining <= 1, CALL);
             }
             // _PY_FRAME_GENERAL
             args = &stack_pointer[-oparg];
@@ -5137,7 +5151,15 @@
             _Py_CODEUNIT *this_instr = next_instr - 1;
             (void)this_instr;
             assert(frame == tstate->current_frame);
-            if (tstate->tracing == 0) {
+            #ifdef Py_GIL_DISABLED
+            // For thread-safety, we need to check instrumentation version
+            // even when tracing. Otherwise, another thread may concurrently
+            // re-write the bytecode while we are executing this function.
+            int check_instrumentation = 1;
+            #else
+            int check_instrumentation = (tstate->tracing == 0);
+            #endif
+            if (check_instrumentation) {
                 uintptr_t global_version =
                 _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) &
                 ~_PY_EVAL_EVENTS_MASK;

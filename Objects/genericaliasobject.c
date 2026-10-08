@@ -133,10 +133,15 @@ ga_repr_items_list(_PyUnicodeWriter *writer, PyObject *p)
                 return -1;
             }
         }
-        PyObject *item = PyList_GET_ITEM(p, i);
+        PyObject *item = PyList_GetItemRef(p, i);
+        if (item == NULL) {
+            return -1;  // list can be mutated in a callback
+        }
         if (ga_repr_item(writer, item) < 0) {
+            Py_DECREF(item);
             return -1;
         }
+        Py_DECREF(item);
     }
 
     if (_PyUnicodeWriter_WriteASCIIString(writer, "]", 1) < 0) {
@@ -239,11 +244,16 @@ tuple_extend(PyObject **dst, Py_ssize_t dstindex,
 PyObject *
 _Py_make_parameters(PyObject *args)
 {
+    if (Py_EnterRecursiveCall(" in __parameter__ calculation")) {
+        return NULL;
+    }
+
     Py_ssize_t nargs = PyTuple_GET_SIZE(args);
     Py_ssize_t len = nargs;
     PyObject *parameters = PyTuple_New(len);
-    if (parameters == NULL)
-        return NULL;
+    if (parameters == NULL) {
+        goto cleanup;
+    }
     Py_ssize_t iparam = 0;
     for (Py_ssize_t iarg = 0; iarg < nargs; iarg++) {
         PyObject *t = PyTuple_GET_ITEM(args, iarg);
@@ -253,8 +263,7 @@ _Py_make_parameters(PyObject *args)
         }
         int rc = PyObject_HasAttrWithError(t, &_Py_ID(__typing_subst__));
         if (rc < 0) {
-            Py_DECREF(parameters);
-            return NULL;
+            goto error;
         }
         if (rc) {
             iparam += tuple_add(parameters, iparam, t);
@@ -263,8 +272,7 @@ _Py_make_parameters(PyObject *args)
             PyObject *subparams;
             if (PyObject_GetOptionalAttr(t, &_Py_ID(__parameters__),
                                      &subparams) < 0) {
-                Py_DECREF(parameters);
-                return NULL;
+                goto error;
             }
             if (subparams && PyTuple_Check(subparams)) {
                 Py_ssize_t len2 = PyTuple_GET_SIZE(subparams);
@@ -273,8 +281,7 @@ _Py_make_parameters(PyObject *args)
                     len += needed;
                     if (_PyTuple_Resize(&parameters, len) < 0) {
                         Py_DECREF(subparams);
-                        Py_DECREF(parameters);
-                        return NULL;
+                        goto cleanup;
                     }
                 }
                 for (Py_ssize_t j = 0; j < len2; j++) {
@@ -287,11 +294,17 @@ _Py_make_parameters(PyObject *args)
     }
     if (iparam < len) {
         if (_PyTuple_Resize(&parameters, iparam) < 0) {
-            Py_XDECREF(parameters);
-            return NULL;
+            goto error;
         }
     }
+    Py_LeaveRecursiveCall();
     return parameters;
+
+error:
+    Py_XDECREF(parameters);
+cleanup:
+    Py_LeaveRecursiveCall();
+    return NULL;
 }
 
 /* If obj is a generic alias, substitute type variables params
@@ -439,6 +452,9 @@ _Py_subs_parameters(PyObject *self, PyObject *args, PyObject *parameters, PyObje
                             self);
     }
     item = _unpack_args(item);
+    if (item == NULL) {
+        return NULL;
+    }
     for (Py_ssize_t i = 0; i < nparams; i++) {
         PyObject *param = PyTuple_GET_ITEM(parameters, i);
         PyObject *prepare, *tmp;
@@ -504,8 +520,18 @@ _Py_subs_parameters(PyObject *self, PyObject *args, PyObject *parameters, PyObje
         }
         if (subst) {
             Py_ssize_t iparam = tuple_index(parameters, nparams, arg);
-            assert(iparam >= 0);
-            arg = PyObject_CallOneArg(subst, argitems[iparam]);
+            if (iparam < 0) {
+                // __parameters__ may be stale if an argument gained
+                // __typing_subst__ after the tuple was computed.
+                PyErr_Format(PyExc_TypeError,
+                             "argument %R with __typing_subst__ was not found "
+                             "in __parameters__",
+                             arg);
+                arg = NULL;
+            }
+            else {
+                arg = PyObject_CallOneArg(subst, argitems[iparam]);
+            }
             Py_DECREF(subst);
         }
         else {
@@ -517,11 +543,22 @@ _Py_subs_parameters(PyObject *self, PyObject *args, PyObject *parameters, PyObje
             return NULL;
         }
         if (unpack) {
+            if (!PyTuple_Check(arg)) {
+                Py_DECREF(newargs);
+                Py_DECREF(item);
+                PyObject *original = PyTuple_GET_ITEM(args, iarg);
+                PyErr_Format(PyExc_TypeError,
+                             "expected __typing_subst__ of %T objects to return a tuple, not %T",
+                             original, arg);
+                Py_DECREF(arg);
+                return NULL;
+            }
             jarg = tuple_extend(&newargs, jarg,
                     &PyTuple_GET_ITEM(arg, 0), PyTuple_GET_SIZE(arg));
             Py_DECREF(arg);
             if (jarg < 0) {
                 Py_DECREF(item);
+                assert(newargs == NULL);
                 return NULL;
             }
         }
@@ -540,7 +577,8 @@ PyDoc_STRVAR(genericalias__doc__,
 "--\n\n"
 "Represent a PEP 585 generic type\n"
 "\n"
-"E.g. for t = list[int], t.__origin__ is list and t.__args__ is (int,).");
+"For example, for t = list[int], t.__origin__ is list and t.__args__\n"
+"is (int,).");
 
 static PyObject *
 ga_getitem(PyObject *self, PyObject *item)
@@ -620,13 +658,12 @@ ga_vectorcall(PyObject *self, PyObject *const *args,
               size_t nargsf, PyObject *kwnames)
 {
     gaobject *alias = (gaobject *) self;
-    PyObject *obj = PyVectorcall_Function(alias->origin)(alias->origin, args, nargsf, kwnames);
+    PyObject *obj = PyObject_Vectorcall(alias->origin, args, nargsf, kwnames);
     return set_orig_class(obj, self);
 }
 
 static const char* const attr_exceptions[] = {
     "__class__",
-    "__bases__",
     "__origin__",
     "__args__",
     "__unpacked__",
@@ -635,6 +672,11 @@ static const char* const attr_exceptions[] = {
     "__mro_entries__",
     "__reduce_ex__",  // needed so we don't look up object.__reduce_ex__
     "__reduce__",
+    NULL,
+};
+
+static const char* const attr_blocked[] = {
+    "__bases__",
     "__copy__",
     "__deepcopy__",
     NULL,
@@ -645,15 +687,29 @@ ga_getattro(PyObject *self, PyObject *name)
 {
     gaobject *alias = (gaobject *)self;
     if (PyUnicode_Check(name)) {
+        // When we check blocked attrs, we don't allow to proxy them to `__origin__`.
+        // Otherwise, we can break existing code.
+        for (const char * const *p = attr_blocked; ; p++) {
+            if (*p == NULL) {
+                break;
+            }
+            if (_PyUnicode_EqualToASCIIString(name, *p)) {
+                goto generic_getattr;
+            }
+        }
+
+        // When we see own attrs, it has a priority over `__origin__`'s attr.
         for (const char * const *p = attr_exceptions; ; p++) {
             if (*p == NULL) {
                 return PyObject_GetAttr(alias->origin, name);
             }
             if (_PyUnicode_EqualToASCIIString(name, *p)) {
-                break;
+                goto generic_getattr;
             }
         }
     }
+
+generic_getattr:
     return PyObject_GenericGetAttr(self, name);
 }
 

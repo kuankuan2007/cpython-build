@@ -42,6 +42,7 @@ from test.support import (
     requires_gil_enabled,
     Py_GIL_DISABLED,
     force_not_colorized_test_class,
+    catch_unraisable_exception
 )
 from test.support.import_helper import (
     forget, make_legacy_pyc, unlink, unload, ready_to_import,
@@ -378,6 +379,15 @@ class ImportTests(unittest.TestCase, ExtraAssertions):
         with self.assertRaises(ModuleNotFoundError):
             import something_that_should_not_exist_anywhere
 
+    def test_import_null_byte_in_name_raises_ModuleNotFoundError(self):
+        # gh-150633: module names containing null bytes should not
+        # lead to duplicates in sys.modules
+        before = set(sys.modules.keys())
+        with self.assertRaises(ModuleNotFoundError):
+            __import__('zipimport\x00junk')
+
+        self.assertEqual(set(sys.modules.keys()), before)
+
     def test_from_import_missing_module_raises_ModuleNotFoundError(self):
         with self.assertRaises(ModuleNotFoundError):
             from something_that_should_not_exist_anywhere import blah
@@ -496,6 +506,7 @@ class ImportTests(unittest.TestCase, ExtraAssertions):
                 forget(TESTFN)
                 unlink(source)
                 unlink(pyc)
+                rmtree('__pycache__')
 
         sys.path.insert(0, os.curdir)
         try:
@@ -675,6 +686,7 @@ class ImportTests(unittest.TestCase, ExtraAssertions):
                   import importlib
             sys.argv.insert(0, C())
             """))
+        self.addCleanup(unlink, testfn)
         script_helper.assert_python_ok(testfn)
 
     @skip_if_dont_write_bytecode
@@ -794,7 +806,7 @@ class ImportTests(unittest.TestCase, ExtraAssertions):
         pydname = importlib.util.find_spec("_sqlite3").origin
         depname = os.path.join(
             os.path.dirname(pydname),
-            "sqlite3{}.dll".format("_d" if "_d" in pydname else ""))
+            "sqlite3{}.dll".format("_d" if "_d" in os.path.basename(pydname) else ""))
 
         with os_helper.temp_dir() as tmp:
             tmp2 = os.path.join(tmp, "DLLs")
@@ -1206,6 +1218,7 @@ except ImportError as e:
 
     @unittest.skipIf(sys.platform == 'win32', 'Cannot delete cwd on Windows')
     @unittest.skipIf(sys.platform == 'sunos5', 'Cannot delete cwd on Solaris/Illumos')
+    @unittest.skipIf(sys.platform.startswith('aix'), 'Cannot delete cwd on AIX')
     def test_script_shadowing_stdlib_cwd_failure(self):
         with os_helper.temp_dir() as tmp:
             subtmp = os.path.join(tmp, "subtmp")
@@ -1628,6 +1641,11 @@ class PycacheTests(unittest.TestCase):
         unlink(self.source)
 
     def setUp(self):
+        # These tests assume bytecode is written next to the source in a
+        # local __pycache__ directory, so neutralize any pycache prefix (e.g.
+        # when the test suite is run with PYTHONPYCACHEPREFIX set).
+        self._orig_pycache_prefix = sys.pycache_prefix
+        sys.pycache_prefix = None
         self.source = TESTFN + '.py'
         self._clean()
         with open(self.source, 'w', encoding='utf-8') as fp:
@@ -1639,6 +1657,7 @@ class PycacheTests(unittest.TestCase):
         assert sys.path[0] == os.curdir, 'Unexpected sys.path[0]'
         del sys.path[0]
         self._clean()
+        sys.pycache_prefix = self._orig_pycache_prefix
 
     @skip_if_dont_write_bytecode
     def test_import_pyc_path(self):
@@ -2065,6 +2084,7 @@ class ImportTracebackTests(unittest.TestCase):
         # encode filenames, especially on Windows
         pyname = script_helper.make_script('', TESTFN_UNENCODABLE, 'pass')
         self.addCleanup(unlink, pyname)
+        self.addCleanup(rmtree, '__pycache__')
         name = pyname[:-3]
         script_helper.assert_python_ok("-c", "mod = __import__(%a)" % name,
                                        __isolated=False)
@@ -2557,6 +2577,33 @@ class SubinterpImportTests(unittest.TestCase):
 
         excsnap = _interpreters.run_string(interpid, script)
         self.assertIsNot(excsnap, None)
+
+    @cpython_only
+    @requires_subinterpreters
+    def test_pyinit_function_raises_exception(self):
+        # gh-144601: PyInit functions that raised exceptions would cause a
+        # crash when imported from a subinterpreter.
+        import _testsinglephase
+        filename = _testsinglephase.__file__
+        script = f"""if True:
+        from test.test_import import import_extension_from_file
+
+        import_extension_from_file('_testsinglephase_raise_exception', {filename!r})"""
+
+        interp = _interpreters.create()
+        try:
+            with catch_unraisable_exception() as cm:
+                exception = _interpreters.run_string(interp, script)
+                unraisable = cm.unraisable
+        finally:
+            _interpreters.destroy(interp)
+
+        self.assertIsNotNone(exception)
+        self.assertIsNotNone(exception.type.__name__, "ImportError")
+        self.assertIsNotNone(exception.msg, "failed to import from subinterpreter due to exception")
+        self.assertIsNotNone(unraisable)
+        self.assertIs(unraisable.exc_type, RuntimeError)
+        self.assertEqual(str(unraisable.exc_value), "evil")
 
 
 class TestSinglePhaseSnapshot(ModuleSnapshot):
@@ -3178,6 +3225,7 @@ class SinglephaseInitTests(unittest.TestCase, ExtraAssertions):
     # Also, we test with a single-phase module that has global state,
     # which is shared by all interpreters.
 
+    @no_rerun(reason="module state is not cleared (see gh-140657)")
     @requires_subinterpreters
     def test_basic_multiple_interpreters_main_no_reset(self):
         # without resetting; already loaded in main interpreter

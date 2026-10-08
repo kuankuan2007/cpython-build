@@ -1,6 +1,5 @@
 from decimal import Decimal
 from test.support import verbose, is_android, is_emscripten, is_wasi
-from test.support.warnings_helper import check_warnings
 from test.support.import_helper import import_fresh_module
 from unittest import mock
 import unittest
@@ -345,8 +344,7 @@ class TestEnUSCollation(BaseLocalizedTest, TestCollation):
         enc = codecs.lookup(locale.getencoding() or 'ascii').name
         if enc not in ('utf-8', 'iso8859-1', 'cp1252'):
             raise unittest.SkipTest('encoding not suitable')
-        if enc != 'iso8859-1' and (sys.platform == 'darwin' or is_android or
-                                   sys.platform.startswith('freebsd')):
+        if enc != 'iso8859-1' and is_android:
             raise unittest.SkipTest('wcscoll/wcsxfrm have known bugs')
         BaseLocalizedTest.setUp(self)
 
@@ -561,8 +559,7 @@ class TestMiscellaneous(unittest.TestCase):
 
             os.environ['LC_CTYPE'] = 'UTF-8'
 
-            with check_warnings(('', DeprecationWarning)):
-                self.assertEqual(locale.getdefaultlocale(), (None, 'UTF-8'))
+            self.assertEqual(locale.getdefaultlocale(), (None, 'UTF-8'))
 
         finally:
             for k in orig_env:

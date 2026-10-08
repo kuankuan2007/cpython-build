@@ -1689,7 +1689,7 @@ some consistency rules, if possible:
 
   The last two expressions apply to totally ordered collections (e.g. to
   sequences, but not to sets or mappings). See also the
-  :func:`~functools.total_ordering` decorator.
+  :deco:`~functools.total_ordering` decorator.
 
 * The :func:`hash` result should be consistent with equality.
   Objects that are equal should either have the same hash value,
@@ -1871,8 +1871,9 @@ Conditional expressions
    conditional_expression: `or_test` ["if" `or_test` "else" `expression`]
    expression: `conditional_expression` | `lambda_expr`
 
-Conditional expressions (sometimes called a "ternary operator") have the lowest
-priority of all Python operations.
+A conditional expression (sometimes called a "ternary operator") is an
+alternative to the if-else statement. As it is an expression, it returns a value
+and can appear as a sub-expression.
 
 The expression ``x if C else y`` first evaluates the condition, *C* rather than *x*.
 If *C* is true, *x* is evaluated and its value is returned; otherwise, *y* is

@@ -435,7 +435,7 @@ _queueitem_clear_data(_queueitem *item)
         return;
     }
     // It was allocated in queue_put().
-    (void)_release_xid_data(item->data, XID_IGNORE_EXC & XID_FREE);
+    (void)_release_xid_data(item->data, XID_IGNORE_EXC | XID_FREE);
     item->data = NULL;
 }
 
@@ -1108,6 +1108,7 @@ queue_create(_queues *queues, Py_ssize_t maxsize, int fmt, int unboundop)
     }
     int64_t qid = _queues_add(queues, queue);
     if (qid < 0) {
+        queue->alive = 0;
         _queue_clear(queue);
         GLOBAL_FREE(queue);
     }
@@ -1355,6 +1356,7 @@ _queueobj_from_xid(_PyCrossInterpreterData *data)
         // XXX import it?
         PyErr_SetString(PyExc_RuntimeError,
                         MODULE_NAME_STR " module not imported yet");
+        Py_DECREF(qidobj);
         return NULL;
     }
 

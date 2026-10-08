@@ -270,7 +270,7 @@ operation is being performed, so the intermediate analysis object isn't useful:
       Added the *show_caches* and *adaptive* parameters.
 
 
-.. function:: distb(tb=None, *, file=None, show_caches=False, adaptive=False,
+.. function:: distb(tb=None, *, file=None, show_caches=False, adaptive=False, \
                     show_offset=False)
 
    Disassemble the top-of-stack function of a traceback, using the last
@@ -716,7 +716,7 @@ not have to be) the original ``STACK[-2]``.
       end = STACK.pop()
       start = STACK.pop()
       container = STACK.pop()
-      values = STACK.pop()
+      value = STACK.pop()
       container[start:end] = value
 
    .. versionadded:: 3.12

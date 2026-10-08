@@ -15,6 +15,10 @@
 #include "frameobject.h"          // PyFrame_New()
 #include "marshal.h"              // PyMarshal_WriteLongToFile()
 
+#ifdef bool
+#  error "The public headers should not include <stdbool.h>, see gh-90904"
+#endif
+
 #include <float.h>                // FLT_MAX
 #include <signal.h>
 #include <stddef.h>               // offsetof()
@@ -22,9 +26,8 @@
 #ifdef HAVE_SYS_WAIT_H
 #  include <sys/wait.h>           // W_STOPCODE
 #endif
-
-#ifdef bool
-#  error "The public headers should not include <stdbool.h>, see gh-48924"
+#ifdef HAVE_SYS_SYSCTL_H
+#  include <sys/sysctl.h>         // sysctlbyname()
 #endif
 
 #include "_testcapi/util.h"
@@ -106,7 +109,7 @@ test_sizeof_c_types(PyObject *self, PyObject *Py_UNUSED(ignored))
 #define CHECK_SIZEOF(TYPE, EXPECTED)         \
     if (EXPECTED != sizeof(TYPE))  {         \
         PyErr_Format(get_testerror(self),    \
-            "sizeof(%s) = %u instead of %u", \
+            "sizeof(%s) = %zu instead of %u", \
             #TYPE, sizeof(TYPE), EXPECTED);  \
         return (PyObject*)NULL;              \
     }
@@ -329,6 +332,18 @@ pycompilestring(PyObject* self, PyObject *obj) {
         return NULL;
     }
     return Py_CompileString(the_string, "<string>", Py_file_input);
+}
+
+static PyObject*
+pycompilestringexflags(PyObject *self, PyObject *args) {
+    const char *the_string, *filename;
+    int start, flags;
+    if (!PyArg_ParseTuple(args, "ysii", &the_string, &filename, &start, &flags)) {
+        return NULL;
+    }
+    PyCompilerFlags cf = _PyCompilerFlags_INIT;
+    cf.cf_flags = flags;
+    return Py_CompileStringExFlags(the_string, filename, start, &cf, -1);
 }
 
 static PyObject*
@@ -3322,6 +3337,34 @@ test_atexit(PyObject *self, PyObject *Py_UNUSED(args))
     Py_RETURN_NONE;
 }
 
+// Used by `finalize_thread_hang`.
+#ifdef _POSIX_THREADS
+static void finalize_thread_hang_cleanup_callback(void *Py_UNUSED(arg)) {
+    // Should not reach here.
+    Py_FatalError("pthread thread termination was triggered unexpectedly");
+}
+#endif
+
+// Tests that finalization does not trigger pthread cleanup.
+//
+// Must be called with a single nullary callable function that should block
+// (with GIL released) until finalization is in progress.
+static PyObject *
+finalize_thread_hang(PyObject *self, PyObject *callback)
+{
+    // WASI builds some pthread stuff but doesn't have these APIs today?
+#if defined(_POSIX_THREADS) && !defined(__wasi__)
+    pthread_cleanup_push(finalize_thread_hang_cleanup_callback, NULL);
+#endif
+    PyObject_CallNoArgs(callback);
+    // Should not reach here.
+    Py_FatalError("thread unexpectedly did not hang");
+#if defined(_POSIX_THREADS) && !defined(__wasi__)
+    pthread_cleanup_pop(0);
+#endif
+    Py_RETURN_NONE;
+}
+
 
 static void
 tracemalloc_track_race_thread(void *data)
@@ -3446,6 +3489,31 @@ toggle_reftrace_printer(PyObject *ob, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+
+#ifdef HAVE_SYSCTLBYNAME
+static PyObject*
+uptime_bsd(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
+{
+    struct timeval tv;
+    size_t size = sizeof(tv);
+    int res = sysctlbyname("kern.boottime", &tv, &size, NULL, 0);
+    if (res != 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    double boottime = (double)tv.tv_sec + tv.tv_usec * 1e-6;
+
+    PyTime_t now_t;
+    if (PyTime_Time(&now_t) < 0) {
+        return NULL;
+    }
+    double now = PyTime_AsSecondsDouble(now_t);
+
+    double uptime = now - boottime;
+    return PyFloat_FromDouble(uptime);
+}
+#endif
+
+
 static PyMethodDef TestMethods[] = {
     {"set_errno",               set_errno,                       METH_VARARGS},
     {"test_config",             test_config,                     METH_NOARGS},
@@ -3524,6 +3592,7 @@ static PyMethodDef TestMethods[] = {
     {"return_result_with_error", return_result_with_error, METH_NOARGS},
     {"getitem_with_error", getitem_with_error, METH_VARARGS},
     {"Py_CompileString",     pycompilestring, METH_O},
+    {"Py_CompileStringExFlags", pycompilestringexflags, METH_VARARGS},
     {"dict_get_version", dict_get_version, METH_VARARGS},
     {"raise_SIGINT_then_send_None", raise_SIGINT_then_send_None, METH_VARARGS},
     {"stack_pointer", stack_pointer, METH_NOARGS},
@@ -3590,6 +3659,10 @@ static PyMethodDef TestMethods[] = {
     {"test_atexit", test_atexit, METH_NOARGS},
     {"tracemalloc_track_race", tracemalloc_track_race, METH_NOARGS},
     {"toggle_reftrace_printer", toggle_reftrace_printer, METH_O},
+    {"finalize_thread_hang", finalize_thread_hang, METH_O, NULL},
+#ifdef HAVE_SYSCTLBYNAME
+    {"uptime_bsd", uptime_bsd, METH_NOARGS},
+#endif
     {NULL, NULL} /* sentinel */
 };
 
@@ -4285,6 +4358,9 @@ PyInit__testcapi(void)
         return NULL;
     }
     if (_PyTestCapi_Init_Object(m) < 0) {
+        return NULL;
+    }
+    if (_PyTestCapi_Init_Weakref(m) < 0) {
         return NULL;
     }
 

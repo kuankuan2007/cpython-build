@@ -100,11 +100,13 @@ _io._IOBase.seek
 
 Change the stream position to the given byte offset.
 
-The offset is interpreted relative to the position indicated by whence.
-Values for whence are:
+The offset is interpreted relative to the position indicated by
+whence.  Values for whence are:
 
-* os.SEEK_SET or 0 -- start of stream (the default); offset should be zero or positive
-* os.SEEK_CUR or 1 -- current stream position; offset may be negative
+* os.SEEK_SET or 0 -- start of stream (the default); offset should
+  be zero or positive
+* os.SEEK_CUR or 1 -- current stream position; offset may be
+  negative
 * os.SEEK_END or 2 -- end of stream; offset is usually negative
 
 Return the new absolute position.
@@ -113,7 +115,7 @@ Return the new absolute position.
 static PyObject *
 _io__IOBase_seek_impl(PyObject *self, PyTypeObject *cls,
                       int Py_UNUSED(offset), int Py_UNUSED(whence))
-/*[clinic end generated code: output=8bd74ea6538ded53 input=74211232b363363e]*/
+/*[clinic end generated code: output=8bd74ea6538ded53 input=22eaf07a7a0ee289]*/
 {
     _PyIO_State *state = get_io_state_by_cls(cls);
     return iobase_unsupported(state, "seek");
@@ -140,14 +142,14 @@ _io._IOBase.truncate
 
 Truncate file to size bytes.
 
-File pointer is left unchanged. Size defaults to the current IO position
-as reported by tell(). Return the new size.
+File pointer is left unchanged.  Size defaults to the current IO
+position as reported by tell().  Return the new size.
 [clinic start generated code]*/
 
 static PyObject *
 _io__IOBase_truncate_impl(PyObject *self, PyTypeObject *cls,
                           PyObject *Py_UNUSED(size))
-/*[clinic end generated code: output=2013179bff1fe8ef input=660ac20936612c27]*/
+/*[clinic end generated code: output=2013179bff1fe8ef input=5b3b6ab3c7abd806]*/
 {
     _PyIO_State *state = get_io_state_by_cls(cls);
     return iobase_unsupported(state, "truncate");
@@ -931,14 +933,21 @@ _io__RawIOBase_read_impl(PyObject *self, Py_ssize_t n)
         return res;
     }
 
-    n = PyNumber_AsSsize_t(res, PyExc_ValueError);
+    Py_ssize_t bytes_filled = PyNumber_AsSsize_t(res, PyExc_ValueError);
     Py_DECREF(res);
-    if (n == -1 && PyErr_Occurred()) {
+    if (bytes_filled == -1 && PyErr_Occurred()) {
         Py_DECREF(b);
         return NULL;
     }
+    if (bytes_filled < 0 || bytes_filled > n) {
+        Py_DECREF(b);
+        PyErr_Format(PyExc_ValueError,
+                     "readinto returned %zd outside buffer size %zd",
+                     bytes_filled, n);
+        return NULL;
+    }
 
-    res = PyBytes_FromStringAndSize(PyByteArray_AsString(b), n);
+    res = PyBytes_FromStringAndSize(PyByteArray_AsString(b), bytes_filled);
     Py_DECREF(b);
     return res;
 }

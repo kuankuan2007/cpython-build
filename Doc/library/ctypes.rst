@@ -14,6 +14,14 @@
 data types, and allows calling functions in DLLs or shared libraries.  It can be
 used to wrap these libraries in pure Python.
 
+.. warning::
+
+   :mod:`!ctypes` provides low-level access to native libraries and the
+   process's memory, bypassing Python's safety mechanisms and allowing
+   execution of arbitrary native code.
+   Incorrect use can corrupt data and objects, reveal sensitive information,
+   cause crashes, or otherwise compromise the running process.
+
 
 .. _ctypes-ctypes-tutorial:
 
@@ -190,10 +198,8 @@ argument values::
    OSError: exception: access violation reading 0x00000020
    >>>
 
-There are, however, enough ways to crash Python with :mod:`ctypes`, so you
-should be careful anyway.  The :mod:`faulthandler` module can be helpful in
-debugging crashes (e.g. from segmentation faults produced by erroneous C library
-calls).
+The :mod:`faulthandler` module can help debug crashes,
+such as segmentation faults produced by erroneous C library calls.
 
 ``None``, integers, bytes objects and (unicode) strings are the only native
 Python objects that can directly be used as parameters in these function calls.
@@ -432,7 +438,7 @@ object with an :attr:`!_as_parameter_` attribute::
    >>>
 
 If you don't want to store the instance's data in the :attr:`!_as_parameter_`
-instance variable, you could define a :class:`property` which makes the
+instance variable, you could define a :deco:`property` which makes the
 attribute available on request.
 
 
@@ -828,6 +834,15 @@ you're doing, just as in C: You can access or change arbitrary memory locations.
 Generally you only use this feature if you receive a pointer from a C function,
 and you *know* that the pointer actually points to an array instead of a single
 item.
+
+.. warning::
+
+   Because pointer objects support subscription, they implicitly support
+   :term:`iteration <iterator>`. Unless doing this in a controlled manner,
+   such as by manually calling :func:`next` on a :func:`pointer` iterator, this
+   will typically lead to infinite loops or crashes, because ctypes has no way
+   of knowing when to stop iteration. In other words, a ``pointer`` iterator
+   will infinitely yield arbitrary memory.
 
 Behind the scenes, the :func:`pointer` function does more than simply create
 pointer instances, it has to create pointer *types* first. This is done with the
@@ -1335,6 +1350,9 @@ On Linux, :func:`~ctypes.util.find_library` tries to run external programs
 (``/sbin/ldconfig``, ``gcc``, ``objdump`` and ``ld``) to find the library file.
 It returns the filename of the library file.
 
+Note that if the output of these programs does not correspond to the dynamic
+linker used by Python, the result of this function may be misleading.
+
 .. versionchanged:: 3.6
    On Linux, the value of the environment variable ``LD_LIBRARY_PATH`` is used
    when searching for libraries, if a library cannot be found by any other means.
@@ -1606,6 +1624,9 @@ object is available:
    attributes.  Note that all these functions are assumed to return C
    :c:expr:`int`, which is of course not always the truth, so you have to assign
    the correct :attr:`!restype` attribute to use these functions.
+
+      Note that if the Python interpreter is statically linked, this will be
+      ``None``, as ``dlopen`` is not possible in this case.
 
 .. audit-event:: ctypes.dlopen name ctypes.LibraryLoader
 
@@ -2036,6 +2057,8 @@ Utility functions
    no library can be found, returns ``None``.
 
    The exact functionality is system dependent.
+
+   See :ref:`ctypes-finding-shared-libraries` for complete documentation.
 
 
 .. function:: find_msvcrt()
@@ -2683,6 +2706,8 @@ Arrays and pointers
    Array elements can be read and written using standard
    subscript and slice accesses; for slice reads, the resulting object is
    *not* itself an :class:`Array`.
+
+   Arrays are :ref:`generic <generics>` over the type of their elements.
 
 
    .. attribute:: _length_

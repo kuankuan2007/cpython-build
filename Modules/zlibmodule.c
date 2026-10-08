@@ -221,6 +221,8 @@ typedef struct
     PyThread_type_lock lock;
 } compobject;
 
+#define _compobject_CAST(op)    ((compobject *)op)
+
 static void
 zlib_error(zlibstate *state, z_stream zst, int err, const char *msg)
 {
@@ -261,7 +263,9 @@ static compobject *
 newcompobject(PyTypeObject *type)
 {
     compobject *self;
-    self = PyObject_New(compobject, type);
+    assert(type != NULL);
+    assert(type->tp_alloc != NULL);
+    self = _compobject_CAST(type->tp_alloc(type, 0));
     if (self == NULL)
         return NULL;
     self->eof = 0;
@@ -704,31 +708,41 @@ zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
 }
 
 static void
-Dealloc(compobject *self)
+compobject_dealloc_impl(PyObject *op, int (*dealloc)(z_streamp))
 {
-    PyObject *type = (PyObject *)Py_TYPE(self);
+    PyTypeObject *type = Py_TYPE(op);
+    PyObject_GC_UnTrack(op);
+    compobject *self = _compobject_CAST(op);
+    if (self->is_initialised) {
+        (void)dealloc(&self->zst);
+    }
     PyThread_free_lock(self->lock);
     Py_XDECREF(self->unused_data);
     Py_XDECREF(self->unconsumed_tail);
     Py_XDECREF(self->zdict);
-    PyObject_Free(self);
+    type->tp_free(self);
     Py_DECREF(type);
 }
 
-static void
-Comp_dealloc(compobject *self)
+static int
+compobject_traverse(PyObject *op, visitproc visit, void *arg)
 {
-    if (self->is_initialised)
-        deflateEnd(&self->zst);
-    Dealloc(self);
+    compobject *self = _compobject_CAST(op);
+    Py_VISIT(Py_TYPE(op));
+    Py_VISIT(self->zdict);
+    return 0;
 }
 
 static void
-Decomp_dealloc(compobject *self)
+Comp_dealloc(PyObject *op)
 {
-    if (self->is_initialised)
-        inflateEnd(&self->zst);
-    Dealloc(self);
+    compobject_dealloc_impl(op, &deflateEnd);
+}
+
+static void
+Decomp_dealloc(PyObject *op)
+{
+    compobject_dealloc_impl(op, &inflateEnd);
 }
 
 /*[clinic input]
@@ -828,6 +842,7 @@ save_unconsumed_input(compobject *self, Py_buffer *data, int err)
             memcpy(PyBytes_AS_STRING(new_data) + old_size,
                       self->zst.next_in, left_size);
             Py_SETREF(self->unused_data, new_data);
+            self->zst.next_in += left_size;
             self->zst.avail_in = 0;
         }
     }
@@ -861,15 +876,15 @@ zlib.Decompress.decompress
 
 Return a bytes object containing the decompressed version of the data.
 
-After calling this function, some of the input data may still be stored in
-internal buffers for later processing.
+After calling this function, some of the input data may still be
+stored in internal buffers for later processing.
 Call the flush() method to clear these buffers.
 [clinic start generated code]*/
 
 static PyObject *
 zlib_Decompress_decompress_impl(compobject *self, PyTypeObject *cls,
                                 Py_buffer *data, Py_ssize_t max_length)
-/*[clinic end generated code: output=b024a93c2c922d57 input=bfb37b3864cfb606]*/
+/*[clinic end generated code: output=b024a93c2c922d57 input=b8c9e2d124fe4720]*/
 {
     int err = Z_OK;
     Py_ssize_t ibuflen;
@@ -1263,6 +1278,13 @@ zlib_Decompress_flush_impl(compobject *self, PyTypeObject *cls,
 
     ENTER_ZLIB(self);
 
+    /* A previous flush() already reached the end of the stream and freed the
+       decompression state, so there is nothing left to process. */
+    if (!self->is_initialised) {
+        LEAVE_ZLIB(self);
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+    }
+
     if (PyObject_GetBuffer(self->unconsumed_tail, &data, PyBUF_SIMPLE) == -1) {
         LEAVE_ZLIB(self);
         return NULL;
@@ -1320,6 +1342,10 @@ zlib_Decompress_flush_impl(compobject *self, PyTypeObject *cls,
             goto abort;
         }
     }
+    else if (err != Z_OK && err != Z_BUF_ERROR) {
+        zlib_error(state, self->zst, err, "while decompressing data");
+        goto abort;
+    }
 
     return_value = OutputBuffer_WindowFinish(&buffer, &window, self->zst.avail_out);
     if (return_value != NULL) {
@@ -1353,15 +1379,19 @@ typedef struct {
     char needs_input;
 } ZlibDecompressor;
 
+#define ZlibDecompressor_CAST(op)   ((ZlibDecompressor *)(op))
+
 /*[clinic input]
 class zlib.ZlibDecompressor "ZlibDecompressor *" "&ZlibDecompressorType"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=0658178ab94645df]*/
 
 static void
-ZlibDecompressor_dealloc(ZlibDecompressor *self)
+ZlibDecompressor_dealloc(PyObject *op)
 {
-    PyObject *type = (PyObject *)Py_TYPE(self);
+    PyTypeObject *type = Py_TYPE(op);
+    PyObject_GC_UnTrack(op);
+    ZlibDecompressor *self = ZlibDecompressor_CAST(op);
     PyThread_free_lock(self->lock);
     if (self->is_initialised) {
         inflateEnd(&self->zst);
@@ -1369,8 +1399,17 @@ ZlibDecompressor_dealloc(ZlibDecompressor *self)
     PyMem_Free(self->input_buffer);
     Py_CLEAR(self->unused_data);
     Py_CLEAR(self->zdict);
-    PyObject_Free(self);
+    type->tp_free(self);
     Py_DECREF(type);
+}
+
+static int
+ZlibDecompressor_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    ZlibDecompressor *self = ZlibDecompressor_CAST(op);
+    Py_VISIT(Py_TYPE(op));
+    Py_VISIT(self->zdict);
+    return 0;
 }
 
 static int
@@ -1648,6 +1687,7 @@ decompress(ZlibDecompressor *self, uint8_t *data,
     return result;
 
 error:
+    self->zst.next_in = NULL;
     Py_XDECREF(result);
     return NULL;
 }
@@ -1660,24 +1700,25 @@ zlib.ZlibDecompressor.decompress
 
 Decompress *data*, returning uncompressed data as bytes.
 
-If *max_length* is nonnegative, returns at most *max_length* bytes of
-decompressed data. If this limit is reached and further output can be
-produced, *self.needs_input* will be set to ``False``. In this case, the next
-call to *decompress()* may provide *data* as b'' to obtain more of the output.
+If *max_length* is nonnegative, returns at most *max_length* bytes
+of decompressed data.  If this limit is reached and further output
+can be produced, *self.needs_input* will be set to ``False``.  In
+this case, the next call to *decompress()* may provide *data* as b''
+to obtain more of the output.
 
-If all of the input data was decompressed and returned (either because this
-was less than *max_length* bytes, or because *max_length* was negative),
-*self.needs_input* will be set to True.
+If all of the input data was decompressed and returned (either
+because this was less than *max_length* bytes, or because
+*max_length* was negative), *self.needs_input* will be set to True.
 
-Attempting to decompress data after the end of stream is reached raises an
-EOFError.  Any data found after the end of the stream is ignored and saved in
-the unused_data attribute.
+Attempting to decompress data after the end of stream is reached
+raises an EOFError.  Any data found after the end of the stream is
+ignored and saved in the unused_data attribute.
 [clinic start generated code]*/
 
 static PyObject *
 zlib_ZlibDecompressor_decompress_impl(ZlibDecompressor *self,
                                       Py_buffer *data, Py_ssize_t max_length)
-/*[clinic end generated code: output=990d32787b775f85 input=0b29d99715250b96]*/
+/*[clinic end generated code: output=990d32787b775f85 input=6fb56d60b48cd843]*/
 
 {
     PyObject *result = NULL;
@@ -1724,7 +1765,7 @@ ZlibDecompressor__new__(PyTypeObject *cls,
             args, kwargs, format, keywords, &wbits, &zdict)) {
         return NULL;
     }
-    ZlibDecompressor *self = PyObject_New(ZlibDecompressor, cls);
+    ZlibDecompressor *self = ZlibDecompressor_CAST(cls->tp_alloc(cls, 0));
     if (self == NULL) {
         return NULL;
     }
@@ -1932,6 +1973,7 @@ static PyMethodDef zlib_methods[] =
 
 static PyType_Slot Comptype_slots[] = {
     {Py_tp_dealloc, Comp_dealloc},
+    {Py_tp_traverse, compobject_traverse},
     {Py_tp_methods, comp_methods},
     {0, 0},
 };
@@ -1939,12 +1981,17 @@ static PyType_Slot Comptype_slots[] = {
 static PyType_Spec Comptype_spec = {
     .name = "zlib.Compress",
     .basicsize = sizeof(compobject),
-    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
+    .flags = (
+        Py_TPFLAGS_DEFAULT
+        | Py_TPFLAGS_DISALLOW_INSTANTIATION
+        | Py_TPFLAGS_HAVE_GC
+    ),
     .slots= Comptype_slots,
 };
 
 static PyType_Slot Decomptype_slots[] = {
     {Py_tp_dealloc, Decomp_dealloc},
+    {Py_tp_traverse, compobject_traverse},
     {Py_tp_methods, Decomp_methods},
     {Py_tp_members, Decomp_members},
     {0, 0},
@@ -1953,12 +2000,17 @@ static PyType_Slot Decomptype_slots[] = {
 static PyType_Spec Decomptype_spec = {
     .name = "zlib.Decompress",
     .basicsize = sizeof(compobject),
-    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
+    .flags = (
+        Py_TPFLAGS_DEFAULT
+        | Py_TPFLAGS_DISALLOW_INSTANTIATION
+        | Py_TPFLAGS_HAVE_GC
+    ),
     .slots = Decomptype_slots,
 };
 
 static PyType_Slot ZlibDecompressor_type_slots[] = {
     {Py_tp_dealloc, ZlibDecompressor_dealloc},
+    {Py_tp_traverse, ZlibDecompressor_traverse},
     {Py_tp_members, ZlibDecompressor_members},
     {Py_tp_new, ZlibDecompressor__new__},
     {Py_tp_doc, (char *)ZlibDecompressor__new____doc__},
@@ -1973,7 +2025,11 @@ static PyType_Spec ZlibDecompressor_type_spec = {
     // ZlibDecompressor_type_spec does not have Py_TPFLAGS_BASETYPE flag
     // which prevents to create a subclass.
     // So calling PyType_GetModuleState() in this file is always safe.
-    .flags = (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE),
+    .flags = (
+        Py_TPFLAGS_DEFAULT
+        | Py_TPFLAGS_IMMUTABLETYPE
+        | Py_TPFLAGS_HAVE_GC
+    ),
     .slots = ZlibDecompressor_type_slots,
 };
 PyDoc_STRVAR(zlib_module_documentation,

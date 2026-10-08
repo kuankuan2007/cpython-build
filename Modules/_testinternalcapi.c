@@ -125,14 +125,14 @@ test_bswap(PyObject *self, PyObject *Py_UNUSED(args))
     uint16_t u16 = _Py_bswap16(UINT16_C(0x3412));
     if (u16 != UINT16_C(0x1234)) {
         PyErr_Format(PyExc_AssertionError,
-                     "_Py_bswap16(0x3412) returns %u", u16);
+                     "_Py_bswap16(0x3412) returns %d", u16);
         return NULL;
     }
 
     uint32_t u32 = _Py_bswap32(UINT32_C(0x78563412));
     if (u32 != UINT32_C(0x12345678)) {
         PyErr_Format(PyExc_AssertionError,
-                     "_Py_bswap32(0x78563412) returns %lu", u32);
+                     "_Py_bswap32(0x78563412) returns %u", u32);
         return NULL;
     }
 
@@ -446,7 +446,7 @@ test_edit_cost(PyObject *self, PyObject *Py_UNUSED(args))
 
 static int
 check_bytes_find(const char *haystack0, const char *needle0,
-                 int offset, Py_ssize_t expected)
+                 Py_ssize_t offset, Py_ssize_t expected)
 {
     Py_ssize_t len_haystack = strlen(haystack0);
     Py_ssize_t len_needle = strlen(needle0);
@@ -864,7 +864,7 @@ get_interp_settings(PyObject *self, PyObject *args)
     }
     else {
         PyErr_Format(PyExc_NotImplementedError,
-                     "%zd", interpid);
+                     "%d", interpid);
         return NULL;
     }
     assert(interp != NULL);
@@ -1156,7 +1156,7 @@ pending_identify(PyObject *self, PyObject *args)
 
     PyThread_type_lock mutex = PyThread_allocate_lock();
     if (mutex == NULL) {
-        return NULL;
+        return PyErr_NoMemory();
     }
     PyThread_acquire_lock(mutex, WAIT_LOCK);
     /* It gets released in _pending_identify_callback(). */
@@ -1986,6 +1986,20 @@ gh_119213_getargs_impl(PyObject *module, PyObject *spam)
 }
 
 
+static PyObject *
+_pyerr_setkeyerror(PyObject *self, PyObject *arg)
+{
+    // Test that _PyErr_SetKeyError() overrides the current exception
+    // if an exception is set
+    PyErr_NoMemory();
+
+    _PyErr_SetKeyError(arg);
+
+    assert(PyErr_Occurred());
+    return NULL;
+}
+
+
 static PyMethodDef module_functions[] = {
     {"get_configs", get_configs, METH_NOARGS},
     {"get_recursion_depth", get_recursion_depth, METH_NOARGS},
@@ -2076,6 +2090,7 @@ static PyMethodDef module_functions[] = {
     {"uop_symbols_test", _Py_uop_symbols_test, METH_NOARGS},
 #endif
     GH_119213_GETARGS_METHODDEF
+    {"_pyerr_setkeyerror", _pyerr_setkeyerror, METH_O},
     {NULL, NULL} /* sentinel */
 };
 

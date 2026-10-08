@@ -56,23 +56,10 @@ files.
 
 The :mod:`pickle` module differs from :mod:`marshal` in several significant ways:
 
-* The :mod:`pickle` module keeps track of the objects it has already serialized,
-  so that later references to the same object won't be serialized again.
-  :mod:`marshal` doesn't do this.
-
-  This has implications both for recursive objects and object sharing.  Recursive
-  objects are objects that contain references to themselves.  These are not
-  handled by marshal, and in fact, attempting to marshal recursive objects will
-  crash your Python interpreter.  Object sharing happens when there are multiple
-  references to the same object in different places in the object hierarchy being
-  serialized.  :mod:`pickle` stores such objects only once, and ensures that all
-  other references point to the master copy.  Shared objects remain shared, which
-  can be very important for mutable objects.
-
 * :mod:`marshal` cannot be used to serialize user-defined classes and their
   instances.  :mod:`pickle` can save and restore class instances transparently,
   however the class definition must be importable and live in the same module as
-  when the object was stored.
+  when the object was pickled.
 
 * The :mod:`marshal` serialization format is not guaranteed to be portable
   across Python versions.  Because its primary job in life is to support
@@ -516,7 +503,7 @@ The following types can be pickled:
 
 * classes accessible from the top level of a module;
 
-* instances of such classes whose the result of calling :meth:`~object.__getstate__`
+* instances of such classes for which the result of calling :meth:`~object.__getstate__`
   is picklable  (see section :ref:`pickle-inst` for details).
 
 Attempts to pickle unpicklable objects will raise the :exc:`PicklingError`
@@ -585,7 +572,7 @@ methods:
 
 .. method:: object.__getnewargs_ex__()
 
-   In protocols 2 and newer, classes that implements the
+   In protocols 2 and newer, classes that implement the
    :meth:`__getnewargs_ex__` method can dictate the values passed to the
    :meth:`__new__` method upon unpickling.  The method must return a pair
    ``(args, kwargs)`` where *args* is a tuple of positional arguments
@@ -693,7 +680,10 @@ or both.
    If a string is returned, the string should be interpreted as the name of a
    global variable.  It should be the object's local name relative to its
    module; the pickle module searches the module namespace to determine the
-   object's module.  This behaviour is typically useful for singletons.
+   object's module: for a given ``obj`` to be pickled, the ``__module__``
+   attribute is looked up on ``obj`` directly, which falls back to a lookup
+   on the type of ``obj`` if no ``__module__`` instance attribute is set.
+   This behaviour is typically useful for singletons.
 
    When a tuple is returned, it must be between two and six items long.
    Optional items can either be omitted, or ``None`` can be provided as their
@@ -716,8 +706,8 @@ or both.
      These items will be appended to the object either using
      ``obj.append(item)`` or, in batch, using ``obj.extend(list_of_items)``.
      This is primarily used for list subclasses, but may be used by other
-     classes as long as they have
-     :ref:`append and extend methods <typesseq-common>` with
+     classes as long as they have :meth:`~sequence.append`
+     and :meth:`~sequence.extend` methods with
      the appropriate signature.  (Whether :meth:`!append` or :meth:`!extend` is
      used depends on which pickle protocol version is used as well as the number
      of items to append, so both must be supported.)

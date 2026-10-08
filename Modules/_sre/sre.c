@@ -1932,7 +1932,7 @@ _validate_inner(SRE_CODE *code, SRE_CODE *end, Py_ssize_t groups)
                sre_match() code is robust even if they don't, and the worst
                you can get is nonsensical match results. */
             GET_ARG;
-            if (arg > 2 * (size_t)groups + 1) {
+            if (arg >= 2 * (size_t)groups) {
                 VTRACE(("arg=%d, groups=%d\n", (int)arg, (int)groups));
                 FAIL;
             }
@@ -3150,7 +3150,7 @@ static PyMethodDef pattern_methods[] = {
     _SRE_SRE_PATTERN___DEEPCOPY___METHODDEF
     _SRE_SRE_PATTERN__FAIL_AFTER_METHODDEF
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     PyDoc_STR("Patterns are generic over the type of string they handle (str or bytes)")},
     {NULL, NULL}
 };
 
@@ -3206,7 +3206,7 @@ static PyMethodDef match_methods[] = {
     _SRE_SRE_MATCH___COPY___METHODDEF
     _SRE_SRE_MATCH___DEEPCOPY___METHODDEF
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     PyDoc_STR("Matches are generic over the type of string which was matched (str or bytes)")},
     {NULL, NULL}
 };
 

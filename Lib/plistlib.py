@@ -21,7 +21,7 @@ datetime.datetime objects.
 
 Generate Plist example:
 
-    import datetime
+    import datetime as dt
     import plistlib
 
     pl = dict(
@@ -37,7 +37,7 @@ Generate Plist example:
         ),
         someData = b"<binary gunk>",
         someMoreData = b"<lots of binary gunk>" * 10,
-        aDate = datetime.datetime.now()
+        aDate = dt.datetime.now()
     )
     print(plistlib.dumps(pl).decode())
 
@@ -73,6 +73,9 @@ from xml.parsers.expat import ParserCreate
 PlistFormat = enum.Enum('PlistFormat', 'FMT_XML FMT_BINARY', module=__name__)
 globals().update(PlistFormat.__members__)
 
+# Data larger than this will be read in chunks, to prevent extreme
+# overallocation.
+_MIN_READ_BUF_SIZE = 1 << 20
 
 class UID:
     def __init__(self, data):
@@ -161,6 +164,25 @@ def _date_to_string(d, aware_datetime):
         d.year, d.month, d.day,
         d.hour, d.minute, d.second
     )
+
+def _dict_items(d, sort_keys, skipkeys):
+    """Return the (key, value) pairs of a dict, sorted if needed.
+
+    Sorting fails for keys of different types, so non-string keys are
+    removed or reported before sorting.
+    """
+    items = d.items()
+    if sort_keys:
+        if skipkeys:
+            items = [item for item in items if isinstance(item[0], str)]
+            items.sort()
+        else:
+            for key in d:
+                if not isinstance(key, str):
+                    raise TypeError("keys must be strings")
+            items = sorted(items)
+    return items
+
 
 def _escape(text):
     m = _controlCharPat.search(text)
@@ -381,7 +403,7 @@ class _PlistWriter(_DumbXMLWriter):
         self._indent_level -= 1
         maxlinelength = max(
             16,
-            76 - len(self.indent.replace(b"\t", b" " * 8) * self._indent_level))
+            76 - len((self.indent * self._indent_level).expandtabs()))
 
         for line in _encode_base64(data, maxlinelength).split(b"\n"):
             if line:
@@ -392,11 +414,7 @@ class _PlistWriter(_DumbXMLWriter):
     def write_dict(self, d):
         if d:
             self.begin_element("dict")
-            if self._sort_keys:
-                items = sorted(d.items())
-            else:
-                items = d.items()
-
+            items = _dict_items(d, self._sort_keys, self._skipkeys)
             for key, value in items:
                 if not isinstance(key, str):
                     if self._skipkeys:
@@ -508,12 +526,24 @@ class _BinaryPlistParser:
 
         return tokenL
 
+    def _read(self, size):
+        cursize = min(size, _MIN_READ_BUF_SIZE)
+        data = self._fp.read(cursize)
+        while True:
+            if len(data) != cursize:
+                raise InvalidFileException
+            if cursize == size:
+                return data
+            delta = min(cursize, size - cursize)
+            data += self._fp.read(delta)
+            cursize += delta
+
     def _read_ints(self, n, size):
-        data = self._fp.read(size * n)
+        data = self._read(size * n)
         if size in _BINARY_FORMAT:
             return struct.unpack(f'>{n}{_BINARY_FORMAT[size]}', data)
         else:
-            if not size or len(data) != size * n:
+            if not size:
                 raise InvalidFileException()
             return tuple(int.from_bytes(data[i: i + size], 'big')
                          for i in range(0, size * n, size))
@@ -573,22 +603,16 @@ class _BinaryPlistParser:
 
         elif tokenH == 0x40:  # data
             s = self._get_size(tokenL)
-            result = self._fp.read(s)
-            if len(result) != s:
-                raise InvalidFileException()
+            result = self._read(s)
 
         elif tokenH == 0x50:  # ascii string
             s = self._get_size(tokenL)
-            data = self._fp.read(s)
-            if len(data) != s:
-                raise InvalidFileException()
+            data = self._read(s)
             result = data.decode('ascii')
 
         elif tokenH == 0x60:  # unicode string
             s = self._get_size(tokenL) * 2
-            data = self._fp.read(s)
-            if len(data) != s:
-                raise InvalidFileException()
+            data = self._read(s)
             result = data.decode('utf-16be')
 
         elif tokenH == 0x80:  # UID
@@ -716,10 +740,7 @@ class _BinaryPlistWriter (object):
         if isinstance(value, dict):
             keys = []
             values = []
-            items = value.items()
-            if self._sort_keys:
-                items = sorted(items)
-
+            items = _dict_items(value, self._sort_keys, self._skipkeys)
             for k, v in items:
                 if not isinstance(k, str):
                     if self._skipkeys:
@@ -837,11 +858,7 @@ class _BinaryPlistWriter (object):
         elif isinstance(value, dict):
             keyRefs, valRefs = [], []
 
-            if self._sort_keys:
-                rootItems = sorted(value.items())
-            else:
-                rootItems = value.items()
-
+            rootItems = _dict_items(value, self._sort_keys, self._skipkeys)
             for k, v in rootItems:
                 if not isinstance(k, str):
                     if self._skipkeys:

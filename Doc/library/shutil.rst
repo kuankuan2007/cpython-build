@@ -83,6 +83,13 @@ Directory and files operations
       copy the file more efficiently. See
       :ref:`shutil-platform-dependent-efficient-copy-operations` section.
 
+.. exception:: SpecialFileError
+
+   This exception is raised when :func:`copyfile` or :func:`copytree` attempt
+   to copy a named pipe.
+
+   .. versionadded:: 2.7
+
 .. exception:: SameFileError
 
    This exception is raised if source and destination in :func:`copyfile`
@@ -374,10 +381,14 @@ Directory and files operations
    If *dst* already exists but is not a directory, it may be overwritten
    depending on :func:`os.rename` semantics.
 
-   If the destination is on the current filesystem, then :func:`os.rename` is
-   used. Otherwise, *src* is copied to the destination using *copy_function*
-   and then removed.  In case of symlinks, a new symlink pointing to the target
-   of *src* will be created as the destination and *src* will be removed.
+   :func:`os.rename` is preferably used internally when *src* and the destination are on
+   the same filesystem. In case :func:`os.rename` fails due to :exc:`OSError`
+   (e.g. the user has write permission to the destination file but not to its parent
+   directory), this method falls back to using *copy_function*, in which case
+   *src* is copied to the destination using *copy_function* and then removed.
+
+   In case of symlinks, a new symlink pointing to the target of *src* will be
+   created in or as the destination, and *src* will be removed.
 
    If *copy_function* is given, it must be a callable that takes two arguments,
    *src* and the destination, and will be used to copy *src* to the destination
@@ -527,7 +538,7 @@ instead of 64 KiB) and a :func:`memoryview`-based variant of
 :func:`shutil.copyfileobj` is used.
 
 If the fast-copy operation fails and no data was written in the destination
-file then shutil will silently fallback on using less efficient
+file then shutil will silently fall back to less efficient
 :func:`copyfileobj` function internally.
 
 .. versionchanged:: 3.8
@@ -666,7 +677,7 @@ provided.  They rely on the :mod:`zipfile` and :mod:`tarfile` modules.
 
    Register an archiver for the format *name*.
 
-   *function* is the callable that will be used to unpack archives. The callable
+   *function* is the callable that will be used to create archives. The callable
    will receive the *base_name* of the file to create, followed by the
    *base_dir* (which defaults to :data:`os.curdir`) to start archiving from.
    Further arguments are passed as keyword arguments: *owner*, *group*,
@@ -721,8 +732,8 @@ provided.  They rely on the :mod:`zipfile` and :mod:`tarfile` modules.
 
       Never extract archives from untrusted sources without prior inspection.
       It is possible that files are created outside of the path specified in
-      the *extract_dir* argument, e.g. members that have absolute filenames
-      starting with "/" or filenames with two dots "..".
+      the *extract_dir* argument, for example, members that have absolute filenames
+      or filenames with ".." components.
 
    .. versionchanged:: 3.7
       Accepts a :term:`path-like object` for *filename* and *extract_dir*.
@@ -835,7 +846,7 @@ In the final archive, :file:`please_add.txt` should be included, but
     ...     root_dir='tmp/root',
     ...     base_dir='structure/content',
     ... )
-    '/Users/tarek/my_archive.tar'
+    '/Users/tarek/myarchive.tar'
 
 Listing the files in the resulting archive gives us:
 

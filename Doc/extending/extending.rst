@@ -545,10 +545,8 @@ calling the Python callback functions from a C callback.  Other uses are also
 imaginable.
 
 Fortunately, the Python interpreter is easily called recursively, and there is a
-standard interface to call a Python function.  (I won't dwell on how to call the
-Python parser with a particular string as input --- if you're interested, have a
-look at the implementation of the :option:`-c` command line option in
-:file:`Modules/main.c` from the Python source code.)
+standard interface to call a Python function.  (If you're interested in how to call the
+Python parser with a particular string as input, see :ref:`veryhigh`.)
 
 Calling a Python function is easy.  First, the Python program must somehow pass
 you the Python function object.  You should provide a function (or some other
@@ -938,7 +936,7 @@ and the object is freed.
 
 An alternative strategy is called :dfn:`automatic garbage collection`.
 (Sometimes, reference counting is also referred to as a garbage collection
-strategy, hence my use of "automatic" to distinguish the two.)  The big
+strategy, hence the use of "automatic" to distinguish the two.)  The big
 advantage of automatic garbage collection is that the user doesn't need to call
 :c:func:`free` explicitly.  (Another claimed advantage is an improvement in speed
 or memory usage --- this is no hard fact however.)  The disadvantage is that for
@@ -1084,7 +1082,14 @@ references to all its items, so when item 1 is replaced, it has to dispose of
 the original item 1.  Now let's suppose the original item 1 was an instance of a
 user-defined class, and let's further suppose that the class defined a
 :meth:`!__del__` method.  If this class instance has a reference count of 1,
-disposing of it will call its :meth:`!__del__` method.
+disposing of it will call its :meth:`!__del__` method. Internally,
+:c:func:`PyList_SetItem` calls :c:func:`Py_DECREF` on the replaced item,
+which invokes replaced item's corresponding
+:c:member:`~PyTypeObject.tp_dealloc` function. During
+deallocation, :c:member:`~PyTypeObject.tp_dealloc` calls
+:c:member:`~PyTypeObject.tp_finalize`, which is mapped to the
+:meth:`!__del__` method for class instances (see :pep:`442`). This entire
+sequence happens synchronously within the :c:func:`PyList_SetItem` call.
 
 Since it is written in Python, the :meth:`!__del__` method can execute arbitrary
 Python code.  Could it perhaps do something to invalidate the reference to
@@ -1400,7 +1405,7 @@ Finally it should be mentioned that Capsules offer additional functionality,
 which is especially useful for memory allocation and deallocation of the pointer
 stored in a Capsule. The details are described in the Python/C API Reference
 Manual in the section :ref:`capsules` and in the implementation of Capsules (files
-:file:`Include/pycapsule.h` and :file:`Objects/pycapsule.c` in the Python source
+:file:`Include/pycapsule.h` and :file:`Objects/capsule.c` in the Python source
 code distribution).
 
 .. rubric:: Footnotes

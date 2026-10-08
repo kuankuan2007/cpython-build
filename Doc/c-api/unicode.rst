@@ -316,12 +316,22 @@ These APIs can be used to work with surrogates:
 
    Check if *ch* is a low surrogate (``0xDC00 <= ch <= 0xDFFF``).
 
+.. c:function:: Py_UCS4 Py_UNICODE_HIGH_SURROGATE(Py_UCS4 ch)
+
+    Return the high UTF-16 surrogate (``0xD800`` to ``0xDBFF``) for a Unicode
+    code point in the range ``[0x10000; 0x10FFFF]``.
+
+.. c:function:: Py_UCS4 Py_UNICODE_LOW_SURROGATE(Py_UCS4 ch)
+
+    Return the low UTF-16 surrogate (``0xDC00`` to ``0xDFFF``) for a Unicode
+    code point in the range ``[0x10000; 0x10FFFF]``.
+
 .. c:function:: Py_UCS4 Py_UNICODE_JOIN_SURROGATES(Py_UCS4 high, Py_UCS4 low)
 
    Join two surrogate code points and return a single :c:type:`Py_UCS4` value.
    *high* and *low* are respectively the leading and trailing surrogates in a
-   surrogate pair. *high* must be in the range [0xD800; 0xDBFF] and *low* must
-   be in the range [0xDC00; 0xDFFF].
+   surrogate pair. *high* must be in the range ``[0xD800; 0xDBFF]`` and *low* must
+   be in the range ``[0xDC00; 0xDFFF]``.
 
 
 Creating and accessing Unicode strings
@@ -672,7 +682,7 @@ APIs:
    Fail if *fill_char* is bigger than the string maximum character, or if the
    string has more than 1 reference.
 
-   Return the number of written character, or return ``-1`` and raise an
+   Return the number of written characters, or return ``-1`` and raise an
    exception on error.
 
    .. versionadded:: 3.3
@@ -1072,7 +1082,7 @@ These are the UTF-8 codec APIs:
    .. versionadded:: 3.3
 
    .. versionchanged:: 3.7
-      The return type is now ``const char *`` rather of ``char *``.
+      The return type is now ``const char *`` rather than ``char *``.
 
    .. versionchanged:: 3.10
       This function is a part of the :ref:`limited API <limited-c-api>`.
@@ -1094,7 +1104,7 @@ These are the UTF-8 codec APIs:
    .. versionadded:: 3.3
 
    .. versionchanged:: 3.7
-      The return type is now ``const char *`` rather of ``char *``.
+      The return type is now ``const char *`` rather than ``char *``.
 
 
 UTF-32 Codecs

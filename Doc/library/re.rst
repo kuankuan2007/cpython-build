@@ -512,8 +512,9 @@ The special characters are:
    *name* exists, and with ``no-pattern`` if it doesn't. ``no-pattern`` is
    optional and can be omitted. For example,
    ``(<)?(\w+@\w+(?:\.\w+)+)(?(1)>|$)`` is a poor email matching pattern, which
-   will match with ``'<user@host.com>'`` as well as ``'user@host.com'``, but
-   not with ``'<user@host.com'`` nor ``'user@host.com>'``.
+   matches ``'<user@host.com>'`` as well as ``'user@host.com'``, but does not
+   match ``'<user@host.com'`` nor ``'user@host.com>'`` in their entirety
+   (:func:`re.search` finds only ``'user@host.com'`` in the former).
 
    .. versionchanged:: 3.12
       Group *id* can only contain ASCII digits.
@@ -1238,6 +1239,9 @@ Regular Expression Objects
 
    Compiled regular expression object returned by :func:`re.compile`.
 
+   Patterns are :ref:`generic <generics>` over the type of string they handle
+   (:class:`str` or :class:`bytes`).
+
    .. versionchanged:: 3.9
       :py:class:`re.Pattern` supports ``[]`` to indicate a Unicode (str) or bytes pattern.
       See :ref:`types-genericalias`.
@@ -1381,6 +1385,9 @@ when there is no match, you can test whether there was a match with a simple
 
    Match object returned by successful ``match``\ es and ``search``\ es.
 
+   Matches are :ref:`generic <generics>` over the type of string which was
+   matched (:class:`str` or :class:`bytes`).
+
    .. versionchanged:: 3.9
       :py:class:`re.Match` supports ``[]`` to indicate a Unicode (str) or bytes match.
       See :ref:`types-genericalias`.
@@ -1404,10 +1411,10 @@ when there is no match, you can test whether there was a match with a simple
    result is a single string; if there are multiple arguments, the result is a
    tuple with one item per argument. Without arguments, *group1* defaults to zero
    (the whole match is returned). If a *groupN* argument is zero, the corresponding
-   return value is the entire matching string; if it is in the inclusive range
-   [1..99], it is the string matching the corresponding parenthesized group.  If a
-   group number is negative or larger than the number of groups defined in the
-   pattern, an :exc:`IndexError` exception is raised. If a group is contained in a
+   return value is the entire matching string; if it is a positive integer, it is
+   the string matching the corresponding parenthesized group.  If a group number is
+   negative or larger than the number of groups defined in the pattern, an
+   :exc:`IndexError` exception is raised. If a group is contained in a
    part of the pattern that did not match, the corresponding result is ``None``.
    If a group is contained in a part of the pattern that matched multiple times,
    the last match is returned. ::
@@ -1880,7 +1887,7 @@ successive matches::
 
     class Token(NamedTuple):
         type: str
-        value: str
+        value: int | float | str
         line: int
         column: int
 

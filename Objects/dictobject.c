@@ -1724,6 +1724,14 @@ static inline int
 insert_combined_dict(PyInterpreterState *interp, PyDictObject *mp,
                      Py_hash_t hash, PyObject *key, PyObject *value)
 {
+    // gh-140551: If dict was cleared in _Py_dict_lookup,
+    // we have to resize one more time to force general key kind.
+    if (DK_IS_UNICODE(mp->ma_keys) && !PyUnicode_CheckExact(key)) {
+        if (insertion_resize(interp, mp, 0) < 0)
+            return -1;
+        assert(mp->ma_keys->dk_kind == DICT_KEYS_GENERAL);
+    }
+
     if (mp->ma_keys->dk_usable <= 0) {
         /* Need to resize. */
         if (insertion_resize(interp, mp, 1) < 0) {
@@ -1824,41 +1832,38 @@ static int
 insertdict(PyInterpreterState *interp, PyDictObject *mp,
            PyObject *key, Py_hash_t hash, PyObject *value)
 {
-    PyObject *old_value;
+    PyObject *old_value = NULL;
+    Py_ssize_t ix;
 
     ASSERT_DICT_LOCKED(mp);
 
-    if (DK_IS_UNICODE(mp->ma_keys) && !PyUnicode_CheckExact(key)) {
-        if (insertion_resize(interp, mp, 0) < 0)
-            goto Fail;
-        assert(mp->ma_keys->dk_kind == DICT_KEYS_GENERAL);
-    }
+    MAINTAIN_TRACKING(mp, key, value);
 
-    if (_PyDict_HasSplitTable(mp)) {
-        Py_ssize_t ix = insert_split_key(mp->ma_keys, key, hash);
+    if (_PyDict_HasSplitTable(mp) && PyUnicode_CheckExact(key)) {
+        ix = insert_split_key(mp->ma_keys, key, hash);
         if (ix != DKIX_EMPTY) {
             insert_split_value(interp, mp, key, value, ix);
             Py_DECREF(key);
             Py_DECREF(value);
             return 0;
         }
-
-        /* No space in shared keys. Resize and continue below. */
-        if (insertion_resize(interp, mp, 1) < 0) {
+        // No space in shared keys. Go to insert_combined_dict() below.
+    }
+    else {
+        ix = _Py_dict_lookup(mp, key, hash, &old_value);
+        if (ix == DKIX_ERROR)
             goto Fail;
-        }
+
     }
 
-    Py_ssize_t ix = _Py_dict_lookup(mp, key, hash, &old_value);
-    if (ix == DKIX_ERROR)
-        goto Fail;
-
-    MAINTAIN_TRACKING(mp, key, value);
-
-    if (ix == DKIX_EMPTY) {
-        assert(!_PyDict_HasSplitTable(mp));
-        /* Insert into new slot. */
-        assert(old_value == NULL);
+    if (old_value == NULL) {
+        // insert_combined_dict() will convert from non DICT_KEYS_GENERAL table
+        // into DICT_KEYS_GENERAL table if key is not Unicode.
+        // We don't convert it before _Py_dict_lookup because non-Unicode key
+        // may change generic table into Unicode table.
+        //
+        // NOTE: ix may not be DKIX_EMPTY because split table may have key
+        // without value.
         if (insert_combined_dict(interp, mp, hash, key, value) < 0) {
             goto Fail;
         }
@@ -1871,10 +1876,14 @@ insertdict(PyInterpreterState *interp, PyDictObject *mp,
         uint64_t new_version = _PyDict_NotifyEvent(
                 interp, PyDict_EVENT_MODIFIED, mp, key, value);
         assert(old_value != NULL);
-        assert(!_PyDict_HasSplitTable(mp));
         if (DK_IS_UNICODE(mp->ma_keys)) {
-            PyDictUnicodeEntry *ep = &DK_UNICODE_ENTRIES(mp->ma_keys)[ix];
-            STORE_VALUE(ep, value);
+            if (_PyDict_HasSplitTable(mp)) {
+                STORE_SPLIT_VALUE(mp, ix, value);
+            }
+            else {
+                PyDictUnicodeEntry *ep = &DK_UNICODE_ENTRIES(mp->ma_keys)[ix];
+                STORE_VALUE(ep, value);
+            }
         }
         else {
             PyDictKeyEntry *ep = &DK_ENTRIES(mp->ma_keys)[ix];
@@ -2794,6 +2803,21 @@ _PyDict_DelItemIf(PyObject *op, PyObject *key,
 }
 
 static void
+clear_embedded_values(PyDictValues *values, Py_ssize_t nentries)
+{
+    PyObject *refs[SHARED_KEYS_MAX_SIZE];
+    assert(nentries <= SHARED_KEYS_MAX_SIZE);
+    for (Py_ssize_t i = 0; i < nentries; i++) {
+        refs[i] = values->values[i];
+        values->values[i] = NULL;
+    }
+    values->size = 0;
+    for (Py_ssize_t i = 0; i < nentries; i++) {
+        Py_XDECREF(refs[i]);
+    }
+}
+
+static void
 clear_lock_held(PyObject *op)
 {
     PyDictObject *mp;
@@ -2824,20 +2848,18 @@ clear_lock_held(PyObject *op)
         assert(oldkeys->dk_refcnt == 1);
         dictkeys_decref(interp, oldkeys, IS_DICT_SHARED(mp));
     }
+    else if (oldvalues->embedded) {
+        clear_embedded_values(oldvalues, oldkeys->dk_nentries);
+    }
     else {
+        set_values(mp, NULL);
+        set_keys(mp, Py_EMPTY_KEYS);
         n = oldkeys->dk_nentries;
         for (i = 0; i < n; i++) {
             Py_CLEAR(oldvalues->values[i]);
         }
-        if (oldvalues->embedded) {
-            oldvalues->size = 0;
-        }
-        else {
-            set_values(mp, NULL);
-            set_keys(mp, Py_EMPTY_KEYS);
-            free_values(oldvalues, IS_DICT_SHARED(mp));
-            dictkeys_decref(interp, oldkeys, false);
-        }
+        free_values(oldvalues, IS_DICT_SHARED(mp));
+        dictkeys_decref(interp, oldkeys, false);
     }
     ASSERT_CONSISTENT(mp);
 }
@@ -4256,6 +4278,7 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
     PyDictObject *mp = (PyDictObject *)d;
     PyObject *value;
     Py_hash_t hash;
+    Py_ssize_t ix;
     PyInterpreterState *interp = _PyInterpreterState_GET();
 
     ASSERT_DICT_LOCKED(d);
@@ -4290,17 +4313,8 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
         return 0;
     }
 
-    if (!PyUnicode_CheckExact(key) && DK_IS_UNICODE(mp->ma_keys)) {
-        if (insertion_resize(interp, mp, 0) < 0) {
-            if (result) {
-                *result = NULL;
-            }
-            return -1;
-        }
-    }
-
-    if (_PyDict_HasSplitTable(mp)) {
-        Py_ssize_t ix = insert_split_key(mp->ma_keys, key, hash);
+    if (_PyDict_HasSplitTable(mp) && PyUnicode_CheckExact(key)) {
+        ix = insert_split_key(mp->ma_keys, key, hash);
         if (ix != DKIX_EMPTY) {
             PyObject *value = mp->ma_values->values[ix];
             int already_present = value != NULL;
@@ -4313,27 +4327,22 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
             }
             return already_present;
         }
-
-        /* No space in shared keys. Resize and continue below. */
-        if (insertion_resize(interp, mp, 1) < 0) {
-            goto error;
-        }
+        // No space in shared keys. Go to insert_combined_dict() below.
     }
-
-    assert(!_PyDict_HasSplitTable(mp));
-
-    Py_ssize_t ix = _Py_dict_lookup(mp, key, hash, &value);
-    if (ix == DKIX_ERROR) {
-        if (result) {
-            *result = NULL;
+    else {
+        ix = _Py_dict_lookup(mp, key, hash, &value);
+        if (ix == DKIX_ERROR) {
+            if (result) {
+                *result = NULL;
+            }
+            return -1;
         }
-        return -1;
     }
 
     if (ix == DKIX_EMPTY) {
-        assert(!_PyDict_HasSplitTable(mp));
         value = default_value;
 
+        // See comment to this function in insertdict.
         if (insert_combined_dict(interp, mp, hash, Py_NewRef(key), Py_NewRef(value)) < 0) {
             Py_DECREF(key);
             Py_DECREF(value);
@@ -4359,12 +4368,6 @@ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_valu
         *result = incref_result ? Py_NewRef(value) : value;
     }
     return 1;
-
-error:
-    if (result) {
-        *result = NULL;
-    }
-    return -1;
 }
 
 int
@@ -4554,10 +4557,8 @@ dict_traverse(PyObject *op, visitproc visit, void *arg)
 
     if (DK_IS_UNICODE(keys)) {
         if (_PyDict_HasSplitTable(mp)) {
-            if (!mp->ma_values->embedded) {
-                for (i = 0; i < n; i++) {
-                    Py_VISIT(mp->ma_values->values[i]);
-                }
+            for (i = 0; i < n; i++) {
+                Py_VISIT(mp->ma_values->values[i]);
             }
         }
         else {
@@ -4694,7 +4695,8 @@ static PyMethodDef mapp_methods[] = {
     DICT_CLEAR_METHODDEF
     DICT_COPY_METHODDEF
     DICT___REVERSED___METHODDEF
-    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS, PyDoc_STR("See PEP 585")},
+    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
+     PyDoc_STR("dicts are generic over two types, signifying (respectively) the types of their keys and values")},
     {NULL,              NULL}   /* sentinel */
 };
 
@@ -5611,8 +5613,11 @@ dictiter_iternextitem(PyObject *self)
         }
         else {
             result = PyTuple_New(2);
-            if (result == NULL)
+            if (result == NULL) {
+                Py_DECREF(key);
+                Py_DECREF(value);
                 return NULL;
+            }
             PyTuple_SET_ITEM(result, 0, key);
             PyTuple_SET_ITEM(result, 1, value);
         }
@@ -5683,9 +5688,12 @@ dictreviter_iter_lock_held(PyDictObject *d, PyObject *self)
         int index = get_index_from_order(d, i);
         key = LOAD_SHARED_KEY(DK_UNICODE_ENTRIES(k)[index].me_key);
         value = d->ma_values->values[index];
-        assert (value != NULL);
+        assert(value != NULL);
     }
     else {
+        if (i >= k->dk_nentries) {
+            goto fail;
+        }
         if (DK_IS_UNICODE(k)) {
             PyDictUnicodeEntry *entry_ptr = &DK_UNICODE_ENTRIES(k)[i];
             while (entry_ptr->me_value == NULL) {
@@ -5708,6 +5716,12 @@ dictreviter_iter_lock_held(PyDictObject *d, PyObject *self)
             key = entry_ptr->me_key;
             value = entry_ptr->me_value;
         }
+    }
+    // We found an element, but did not expect it
+    if (di->len == 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "dictionary keys changed during iteration");
+        goto fail;
     }
     di->di_pos = i-1;
     di->len--;
@@ -7122,16 +7136,21 @@ PyObject_VisitManagedDict(PyObject *obj, visitproc visit, void *arg)
     if((tp->tp_flags & Py_TPFLAGS_MANAGED_DICT) == 0) {
         return 0;
     }
-    if (tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
+    PyDictObject *dict = _PyObject_ManagedDictPointer(obj)->dict;
+    if (dict != NULL) {
+        // GH-130327: If there's a managed dictionary available, we should
+        // *always* traverse it. The dict is responsible for traversing the
+        // inline values if it points to them.
+        Py_VISIT(dict);
+    }
+    else if (tp->tp_flags & Py_TPFLAGS_INLINE_VALUES) {
         PyDictValues *values = _PyObject_InlineValues(obj);
         if (values->valid) {
             for (Py_ssize_t i = 0; i < values->capacity; i++) {
                 Py_VISIT(values->values[i]);
             }
-            return 0;
         }
     }
-    Py_VISIT(_PyObject_ManagedDictPointer(obj)->dict);
     return 0;
 }
 

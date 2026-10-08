@@ -259,7 +259,7 @@ typevar_dealloc(PyObject *self)
 
     _PyObject_GC_UNTRACK(self);
 
-    Py_DECREF(tv->name);
+    Py_XDECREF(tv->name);
     Py_XDECREF(tv->bound);
     Py_XDECREF(tv->evaluate_bound);
     Py_XDECREF(tv->constraints);
@@ -278,6 +278,7 @@ typevar_traverse(PyObject *self, visitproc visit, void *arg)
 {
     Py_VISIT(Py_TYPE(self));
     typevarobject *tv = (typevarobject *)self;
+    Py_VISIT(tv->name);
     Py_VISIT(tv->bound);
     Py_VISIT(tv->evaluate_bound);
     Py_VISIT(tv->constraints);
@@ -291,6 +292,7 @@ typevar_traverse(PyObject *self, visitproc visit, void *arg)
 static int
 typevar_clear(typevarobject *self)
 {
+    Py_CLEAR(self->name);
     Py_CLEAR(self->bound);
     Py_CLEAR(self->evaluate_bound);
     Py_CLEAR(self->constraints);
@@ -555,7 +557,7 @@ typevar_typing_prepare_subst_impl(typevarobject *self, PyObject *alias,
     }
     Py_DECREF(params);
     PyErr_Format(PyExc_TypeError,
-                 "Too few arguments for %S; actual %d, expected at least %d",
+                 "Too few arguments for %S; actual %zd, expected at least %zd",
                  alias, args_len, i + 1);
     return NULL;
 }
@@ -690,6 +692,7 @@ paramspecattr_dealloc(PyObject *self)
     _PyObject_GC_UNTRACK(self);
 
     Py_XDECREF(psa->__origin__);
+    PyObject_ClearWeakRefs(self);
 
     Py_TYPE(self)->tp_free(self);
     Py_DECREF(tp);
@@ -912,7 +915,7 @@ paramspec_dealloc(PyObject *self)
 
     _PyObject_GC_UNTRACK(self);
 
-    Py_DECREF(ps->name);
+    Py_XDECREF(ps->name);
     Py_XDECREF(ps->bound);
     Py_XDECREF(ps->default_value);
     Py_XDECREF(ps->evaluate_default);
@@ -928,6 +931,7 @@ paramspec_traverse(PyObject *self, visitproc visit, void *arg)
 {
     Py_VISIT(Py_TYPE(self));
     paramspecobject *ps = (paramspecobject *)self;
+    Py_VISIT(ps->name);
     Py_VISIT(ps->bound);
     Py_VISIT(ps->default_value);
     Py_VISIT(ps->evaluate_default);
@@ -938,6 +942,7 @@ paramspec_traverse(PyObject *self, visitproc visit, void *arg)
 static int
 paramspec_clear(paramspecobject *self)
 {
+    Py_CLEAR(self->name);
     Py_CLEAR(self->bound);
     Py_CLEAR(self->default_value);
     Py_CLEAR(self->evaluate_default);
@@ -1057,20 +1062,12 @@ paramspec_new_impl(PyTypeObject *type, PyObject *name, PyObject *bound,
         PyErr_SetString(PyExc_ValueError, "Variance cannot be specified with infer_variance.");
         return NULL;
     }
-    if (bound != NULL) {
-        bound = type_check(bound, "Bound must be a type.");
-        if (bound == NULL) {
-            return NULL;
-        }
-    }
     PyObject *module = caller();
     if (module == NULL) {
-        Py_XDECREF(bound);
         return NULL;
     }
     PyObject *ps = (PyObject *)paramspec_alloc(
         name, bound, default_value, covariant, contravariant, infer_variance, module);
-    Py_XDECREF(bound);
     Py_DECREF(module);
     return ps;
 }
@@ -1171,13 +1168,13 @@ The following syntax creates a parameter specification that defaults\n\
 to a callable accepting two positional-only arguments of types int\n\
 and str:\n\
 \n\
-    type IntFuncDefault[**P = (int, str)] = Callable[P, int]\n\
+    type IntFuncDefault[**P = [int, str]] = Callable[P, int]\n\
 \n\
 For compatibility with Python 3.11 and earlier, ParamSpec objects\n\
 can also be created as follows::\n\
 \n\
     P = ParamSpec('P')\n\
-    DefaultP = ParamSpec('DefaultP', default=(int, str))\n\
+    DefaultP = ParamSpec('DefaultP', default=[int, str])\n\
 \n\
 Parameter specification variables exist primarily for the benefit of\n\
 static type checkers.  They are used to forward the parameter types of\n\
@@ -1244,7 +1241,7 @@ typevartuple_dealloc(PyObject *self)
     _PyObject_GC_UNTRACK(self);
     typevartupleobject *tvt = (typevartupleobject *)self;
 
-    Py_DECREF(tvt->name);
+    Py_XDECREF(tvt->name);
     Py_XDECREF(tvt->default_value);
     Py_XDECREF(tvt->evaluate_default);
     PyObject_ClearManagedDict(self);
@@ -1408,8 +1405,10 @@ static int
 typevartuple_traverse(PyObject *self, visitproc visit, void *arg)
 {
     Py_VISIT(Py_TYPE(self));
-    Py_VISIT(((typevartupleobject *)self)->default_value);
-    Py_VISIT(((typevartupleobject *)self)->evaluate_default);
+    typevartupleobject *tvt = (typevartupleobject *)self;
+    Py_VISIT(tvt->name);
+    Py_VISIT(tvt->default_value);
+    Py_VISIT(tvt->evaluate_default);
     PyObject_VisitManagedDict(self, visit, arg);
     return 0;
 }
@@ -1417,8 +1416,10 @@ typevartuple_traverse(PyObject *self, visitproc visit, void *arg)
 static int
 typevartuple_clear(PyObject *self)
 {
-    Py_CLEAR(((typevartupleobject *)self)->default_value);
-    Py_CLEAR(((typevartupleobject *)self)->evaluate_default);
+    typevartupleobject *tvt = (typevartupleobject *)self;
+    Py_CLEAR(tvt->name);
+    Py_CLEAR(tvt->default_value);
+    Py_CLEAR(tvt->evaluate_default);
     PyObject_ClearManagedDict(self);
     return 0;
 }
@@ -1542,7 +1543,7 @@ typealias_dealloc(PyObject *self)
     PyTypeObject *tp = Py_TYPE(self);
     _PyObject_GC_UNTRACK(self);
     typealiasobject *ta = (typealiasobject *)self;
-    Py_DECREF(ta->name);
+    Py_XDECREF(ta->name);
     Py_XDECREF(ta->type_params);
     Py_XDECREF(ta->compute_value);
     Py_XDECREF(ta->value);
@@ -1660,6 +1661,7 @@ typealias_alloc(PyObject *name, PyObject *type_params, PyObject *compute_value,
 static int
 typealias_traverse(typealiasobject *self, visitproc visit, void *arg)
 {
+    Py_VISIT(self->name);
     Py_VISIT(self->type_params);
     Py_VISIT(self->compute_value);
     Py_VISIT(self->value);
@@ -1670,6 +1672,7 @@ typealias_traverse(typealiasobject *self, visitproc visit, void *arg)
 static int
 typealias_clear(typealiasobject *self)
 {
+    Py_CLEAR(self->name);
     Py_CLEAR(self->type_params);
     Py_CLEAR(self->compute_value);
     Py_CLEAR(self->value);
@@ -1713,7 +1716,7 @@ typealias.__new__ as typealias_new
     name: object(subclass_of="&PyUnicode_Type")
     value: object
     *
-    type_params: object = NULL
+    type_params: object(c_default="NULL") = ()
 
 Create a TypeAliasType.
 [clinic start generated code]*/
@@ -1721,7 +1724,7 @@ Create a TypeAliasType.
 static PyObject *
 typealias_new_impl(PyTypeObject *type, PyObject *name, PyObject *value,
                    PyObject *type_params)
-/*[clinic end generated code: output=8920ce6bdff86f00 input=df163c34e17e1a35]*/
+/*[clinic end generated code: output=8920ce6bdff86f00 input=8838986b41cae743]*/
 {
     if (type_params != NULL && !PyTuple_Check(type_params)) {
         PyErr_SetString(PyExc_TypeError, "type_params must be a tuple");
@@ -1831,8 +1834,9 @@ PyDoc_STRVAR(generic_class_getitem_doc,
 "Parameterizes a generic class.\n\
 \n\
 At least, parameterizing a generic class is the *main* thing this\n\
-method does. For example, for some generic class `Foo`, this is called\n\
-when we do `Foo[int]` - there, with `cls=Foo` and `params=int`.\n\
+method does.  For example, for some generic class `Foo`, this is\n\
+called when we do `Foo[int]` - there, with `cls=Foo` and\n\
+`params=int`.\n\
 \n\
 However, note that this method is also called when defining generic\n\
 classes in the first place with `class Foo[T]: ...`.\n\

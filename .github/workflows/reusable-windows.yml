@@ -17,6 +17,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 env:
   FORCE_COLOR: 1
   IncludeUwp: >-
@@ -30,7 +33,7 @@ jobs:
     env:
       ARCH: ${{ inputs.arch }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
     - name: Register MSVC problem matcher
@@ -41,7 +44,7 @@ jobs:
         .\\PCbuild\\build.bat
         -e -d -v
         -p "${ARCH}"
-        ${{ fromJSON(inputs.free-threading) && '--disable-gil' || '' }}
+        ${{ inputs.free-threading && '--disable-gil' || '' }}
       shell: bash
     - name: Display build info  # FIXME(diegorusso): remove the `if`
       if: inputs.arch != 'arm64'
@@ -52,5 +55,5 @@ jobs:
         .\\PCbuild\\rt.bat
         -p "${ARCH}"
         -d -q --fast-ci
-        ${{ fromJSON(inputs.free-threading) && '--disable-gil' || '' }}
+        ${{ inputs.free-threading && '--disable-gil' || '' }}
       shell: bash

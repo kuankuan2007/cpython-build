@@ -19,7 +19,14 @@ as much as it can.
 
 .. c:function:: int PyWeakref_CheckRef(PyObject *ob)
 
-   Return non-zero if *ob* is a reference object.  This function always succeeds.
+   Return non-zero if *ob* is a reference object or a subclass of the reference
+   type.  This function always succeeds.
+
+
+.. c:function:: int PyWeakref_CheckRefExact(PyObject *ob)
+
+   Return non-zero if *ob* is a reference object, but not a subclass of the
+   reference type.  This function always succeeds.
 
 
 .. c:function:: int PyWeakref_CheckProxy(PyObject *ob)
@@ -35,8 +42,12 @@ as much as it can.
    callable object that receives notification when *ob* is garbage collected; it
    should accept a single parameter, which will be the weak reference object
    itself. *callback* may also be ``None`` or ``NULL``.  If *ob* is not a
-   weakly referenceable object, or if *callback* is not callable, ``None``, or
-   ``NULL``, this will return ``NULL`` and raise :exc:`TypeError`.
+   weakly referenceable object, this will raise :exc:`TypeError` and return
+   ``NULL``.
+
+   .. seealso::
+      :c:func:`PyType_SUPPORTS_WEAKREFS` for checking if *ob* is weakly
+      referenceable.
 
 
 .. c:function:: PyObject* PyWeakref_NewProxy(PyObject *ob, PyObject *callback)
@@ -47,8 +58,12 @@ as much as it can.
    be a callable object that receives notification when *ob* is garbage
    collected; it should accept a single parameter, which will be the weak
    reference object itself. *callback* may also be ``None`` or ``NULL``.  If *ob*
-   is not a weakly referenceable object, or if *callback* is not callable,
-   ``None``, or ``NULL``, this will return ``NULL`` and raise :exc:`TypeError`.
+   weakly referenceable object, this will raise :exc:`TypeError` and return
+   ``NULL``.
+
+   .. seealso::
+      :c:func:`PyType_SUPPORTS_WEAKREFS` for checking if *ob* is weakly
+      referenceable.
 
 
 .. c:function:: int PyWeakref_GetRef(PyObject *ref, PyObject **pobj)

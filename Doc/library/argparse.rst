@@ -423,9 +423,8 @@ is considered equivalent to the expression ``['-f', 'foo', '-f', 'bar']``.
 
 .. note::
 
-   Empty lines are treated as empty strings (``''``), which are allowed as values but
-   not as arguments. Empty lines that are read as arguments will result in an
-   "unrecognized arguments" error.
+   Each line is treated as a single argument, so an empty line is read as an
+   empty string (``''``).
 
 :class:`ArgumentParser` uses :term:`filesystem encoding and error handler`
 to read the file containing arguments.
@@ -613,6 +612,8 @@ The add_argument() method
 
    * deprecated_ - Whether or not use of the argument is deprecated.
 
+   The method returns an :class:`Action` object representing the argument.
+
 The following sections describe how each of these are used.
 
 
@@ -676,9 +677,9 @@ how the command-line arguments should be handled. The supplied actions are:
     Namespace(foo=42)
 
 * ``'store_true'`` and ``'store_false'`` - These are special cases of
-  ``'store_const'`` used for storing the values ``True`` and ``False``
-  respectively.  In addition, they create default values of ``False`` and
-  ``True`` respectively::
+  ``'store_const'`` that respectively store the values ``True`` and ``False``
+  with default values of ``False`` and
+  ``True``::
 
     >>> parser = argparse.ArgumentParser()
     >>> parser.add_argument('--foo', action='store_true')
@@ -687,19 +688,19 @@ how the command-line arguments should be handled. The supplied actions are:
     >>> parser.parse_args('--foo --bar'.split())
     Namespace(foo=True, bar=False, baz=True)
 
-* ``'append'`` - This stores a list, and appends each argument value to the
-  list. It is useful to allow an option to be specified multiple times.
-  If the default value is non-empty, the default elements will be present
-  in the parsed value for the option, with any values from the
-  command line appended after those default values. Example usage::
+* ``'append'`` - This appends each argument value to a list.
+  It is useful for allowing an option to be specified multiple times.
+  If the default value is a non-empty list, the parsed value will start
+  with the default list's elements and any values from the command line
+  will be appended after those default values. Example usage::
 
     >>> parser = argparse.ArgumentParser()
-    >>> parser.add_argument('--foo', action='append')
+    >>> parser.add_argument('--foo', action='append', default=['0'])
     >>> parser.parse_args('--foo 1 --foo 2'.split())
-    Namespace(foo=['1', '2'])
+    Namespace(foo=['0', '1', '2'])
 
-* ``'append_const'`` - This stores a list, and appends the value specified by
-  the const_ keyword argument to the list; note that the const_ keyword
+* ``'append_const'`` - This appends the value specified by
+  the const_ keyword argument to a list; note that the const_ keyword
   argument defaults to ``None``. The ``'append_const'`` action is typically
   useful when multiple arguments need to store constants to the same list. For
   example::
@@ -710,8 +711,8 @@ how the command-line arguments should be handled. The supplied actions are:
     >>> parser.parse_args('--str --int'.split())
     Namespace(types=[<class 'str'>, <class 'int'>])
 
-* ``'extend'`` - This stores a list and appends each item from the multi-value
-  argument list to it.
+* ``'extend'`` - This appends each item from a multi-value
+  argument to a list.
   The ``'extend'`` action is typically used with the nargs_ keyword argument
   value ``'+'`` or ``'*'``.
   Note that when nargs_ is ``None`` (the default) or ``'?'``, each
@@ -725,7 +726,7 @@ how the command-line arguments should be handled. The supplied actions are:
 
   .. versionadded:: 3.8
 
-* ``'count'`` - This counts the number of times a keyword argument occurs. For
+* ``'count'`` - This counts the number of times an argument occurs. For
   example, this is useful for increasing verbosity levels::
 
     >>> parser = argparse.ArgumentParser()
@@ -733,7 +734,9 @@ how the command-line arguments should be handled. The supplied actions are:
     >>> parser.parse_args(['-vvv'])
     Namespace(verbose=3)
 
-  Note, the *default* will be ``None`` unless explicitly set to *0*.
+  Unless explicitly set, the *default* will be ``None``. If the default
+  value is a non-zero number, the count starts from that number rather
+  than from zero.
 
 * ``'help'`` - This prints a complete help message for all the options in the
   current parser and then exits. By default a help action is automatically
@@ -896,8 +899,8 @@ the various :class:`ArgumentParser` actions.  The two most common uses of it are
   (like ``-f`` or ``--foo``) and ``nargs='?'``.  This creates an optional
   argument that can be followed by zero or one command-line arguments.
   When parsing the command line, if the option string is encountered with no
-  command-line argument following it, the value of ``const`` will be assumed to
-  be ``None`` instead.  See the nargs_ description for examples.
+  command-line argument following it, the value from ``const`` will be used.
+  See the nargs_ description for examples.
 
 .. versionchanged:: 3.11
    ``const=None`` by default, including when ``action='append_const'`` or
@@ -950,6 +953,10 @@ is used when no command-line argument was present::
    Namespace(foo='a')
    >>> parser.parse_args([])
    Namespace(foo=42)
+
+Because ``nargs='*'`` gathers any supplied values into a list, an absent
+positional argument yields an empty list (``[]``). Only a non-``None``
+*default* overrides this (so ``default=None`` still gives ``[]``).
 
 For required_ arguments, the ``default`` value is ignored. For example, this
 applies to positional arguments with nargs_ values other than ``?`` or ``*``,
@@ -1015,7 +1022,15 @@ User defined functions can be used as well:
 
 The :func:`bool` function is not recommended as a type converter.  All it does
 is convert empty strings to ``False`` and non-empty strings to ``True``.
-This is usually not what is desired.
+This is usually not what is desired::
+
+   >>> parser = argparse.ArgumentParser()
+   >>> _ = parser.add_argument('--verbose', type=bool)
+   >>> parser.parse_args(['--verbose', 'False'])
+   Namespace(verbose=True)
+
+See :class:`BooleanOptionalAction` or ``action='store_true'`` for common
+alternatives.
 
 In general, the ``type`` keyword is a convenience that should only be used for
 simple conversions that can only raise one of the three supported exceptions.
@@ -1058,15 +1073,20 @@ if the argument was not one of the acceptable values::
    game.py: error: argument move: invalid choice: 'fire' (choose from 'rock',
    'paper', 'scissors')
 
-Note that inclusion in the *choices* sequence is checked after any type_
-conversions have been performed, so the type of the objects in the *choices*
-sequence should match the type_ specified.
-
 Any sequence can be passed as the *choices* value, so :class:`list` objects,
 :class:`tuple` objects, and custom sequences are all supported.
 
 Use of :class:`enum.Enum` is not recommended because it is difficult to
 control its appearance in usage, help, and error messages.
+
+Note that *choices* are checked after any type_
+conversions have been performed, so objects in *choices*
+should match the type_ specified. This can make *choices*
+appear unfamiliar in usage, help, or error messages.
+
+To keep *choices* user-friendly, consider a custom type wrapper that
+converts and formats values, or omit type_ and handle conversion in
+your application code.
 
 Formatted choices override the default *metavar* which is normally derived
 from *dest*.  This is usually what you want because the user never sees the
@@ -1251,6 +1271,10 @@ behavior::
    >>> parser.parse_args('--foo XXX'.split())
    Namespace(bar='XXX')
 
+Multiple arguments may share the same ``dest``.  By default, the value from the
+last such argument given on the command line wins.  Use ``action='append'`` to
+collect values from all of them into a list instead.  For conflicting *option
+strings* rather than ``dest`` names, see conflict_handler_.
 
 .. _deprecated:
 
@@ -1425,12 +1449,12 @@ it exits and prints the error along with a usage message::
    >>> # invalid option
    >>> parser.parse_args(['--bar'])
    usage: PROG [-h] [--foo FOO] [bar]
-   PROG: error: no such option: --bar
+   PROG: error: unrecognized arguments: --bar
 
    >>> # wrong number of arguments
    >>> parser.parse_args(['spam', 'badger'])
    usage: PROG [-h] [--foo FOO] [bar]
-   PROG: error: extra arguments found: badger
+   PROG: error: unrecognized arguments: badger
 
 
 Arguments containing ``-``
@@ -1467,7 +1491,7 @@ there are no options in the parser that look like negative numbers::
    >>> # negative number options present, so -2 is an option
    >>> parser.parse_args(['-2'])
    usage: PROG [-h] [-1 ONE] [foo]
-   PROG: error: no such option: -2
+   PROG: error: unrecognized arguments: -2
 
    >>> # negative number options present, so both -1s are options
    >>> parser.parse_args(['-1', '-1'])
@@ -1568,7 +1592,7 @@ The Namespace object
 Other utilities
 ---------------
 
-Sub-commands
+Subcommands
 ^^^^^^^^^^^^
 
 .. method:: ArgumentParser.add_subparsers(*, [title], [description], [prog], \
@@ -1597,7 +1621,7 @@ Sub-commands
    * *description* - description for the sub-parser group in help output, by
      default ``None``
 
-   * *prog* - usage information that will be displayed with sub-command help,
+   * *prog* - usage information that will be displayed with subcommand help,
      by default the name of the program and any positional arguments before the
      subparser argument
 
@@ -1607,7 +1631,7 @@ Sub-commands
    * action_ - the basic type of action to be taken when this argument is
      encountered at the command line
 
-   * dest_ - name of the attribute under which sub-command name will be
+   * dest_ - name of the attribute under which subcommand name will be
      stored; by default ``None`` and no value is stored
 
    * required_ - Whether or not a subcommand must be provided, by default
@@ -1645,6 +1669,11 @@ Sub-commands
    the ``a`` command is specified, only the ``foo`` and ``bar`` attributes are
    present, and when the ``b`` command is specified, only the ``foo`` and
    ``baz`` attributes are present.
+
+   If a subparser defines an argument with the same ``dest`` as the parent
+   parser, the two share a single namespace attribute, so the parent's value
+   won't be retained. Users should give them  distinct ``dest`` values to
+   keep both.
 
    Similarly, when a help message is requested from a subparser, only the help
    for that particular parser will be printed.  The help message will not
@@ -1813,7 +1842,7 @@ FileType objects
       Namespace(infile=<_io.TextIOWrapper name='<stdin>' encoding='UTF-8'>)
 
    .. versionchanged:: 3.4
-      Added the *encodings* and *errors* parameters.
+      Added the *encoding* and *errors* parameters.
 
 
 Argument groups
@@ -1872,6 +1901,9 @@ Argument groups
 
    Note that any arguments not in your user-defined groups will end up back
    in the usual "positional arguments" and "optional arguments" sections.
+
+   Within each argument group, arguments are displayed in help output in the
+   order in which they are added.
 
    .. versionchanged:: 3.11
     Calling :meth:`add_argument_group` on an argument group is deprecated.
@@ -1960,7 +1992,9 @@ Parser defaults
      >>> parser.parse_args(['736'])
      Namespace(bar=42, baz='badger', foo=736)
 
-   Note that parser-level defaults always override argument-level defaults::
+   Note that defaults can be set at both the parser level using :meth:`set_defaults`
+   and at the argument level using :meth:`add_argument`. If both are called for the
+   same argument, the last default set for an argument is used::
 
      >>> parser = argparse.ArgumentParser()
      >>> parser.add_argument('--foo', default='bar')
@@ -2067,6 +2101,9 @@ Customizing file parsing
     class MyArgumentParser(argparse.ArgumentParser):
         def convert_arg_line_to_args(self, arg_line):
             return arg_line.split()
+
+   Note that with this override an argument can no longer contain spaces, since
+   each space-separated word becomes a separate argument.
 
 
 Exiting methods

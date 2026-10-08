@@ -5,8 +5,9 @@ from test import support
 from test.support import import_helper
 from test.support import threading_helper
 # Raise SkipTest if subinterpreters not supported.
-import_helper.import_module('_interpreters')
+_interpreters = import_helper.import_module('_interpreters')
 from test.support import interpreters
+from test.support.interpreters import InterpreterError
 from .utils import TestBase
 
 
@@ -24,6 +25,7 @@ class StressTests(TestBase):
         del alive
         support.gc_collect()
 
+    @threading_helper.requires_working_threading()
     @support.bigmemtest(size=200, memuse=32*2**20, dry_run=False)
     def test_create_many_threaded(self, size):
         alive = []
@@ -73,6 +75,17 @@ class StressTests(TestBase):
         with threading_helper.start_threads(threads):
             start.set()
         support.gc_collect()
+
+    @support.nomemtest
+    def test_create_interpreter_no_memory(self):
+        import _testcapi
+
+        try:
+            with self.assertRaises(InterpreterError):
+                _testcapi.set_nomemory(0, 1)
+                _interpreters.create()
+        finally:
+            _testcapi.remove_mem_hooks()
 
 
 if __name__ == '__main__':

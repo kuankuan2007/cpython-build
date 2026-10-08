@@ -6,6 +6,7 @@ if __name__ != 'test.support':
 import contextlib
 import dataclasses
 import functools
+import inspect
 import logging
 import _opcode
 import os
@@ -29,11 +30,12 @@ __all__ = [
     "record_original_stdout", "get_original_stdout", "captured_stdout",
     "captured_stdin", "captured_stderr", "captured_output",
     # unittest
-    "is_resource_enabled", "requires", "requires_freebsd_version",
+    "is_resource_enabled", "get_resource_value", "requires", "requires_resource",
+    "requires_freebsd_version",
     "requires_gil_enabled", "requires_linux_version", "requires_mac_ver",
     "check_syntax_error",
     "requires_gzip", "requires_bz2", "requires_lzma",
-    "bigmemtest", "bigaddrspacetest", "cpython_only", "get_attribute",
+    "bigmemtest", "nomemtest", "bigaddrspacetest", "cpython_only", "get_attribute",
     "requires_IEEE_754", "requires_zlib",
     "has_fork_support", "requires_fork",
     "has_subprocess_support", "requires_subprocess",
@@ -179,7 +181,7 @@ def get_attribute(obj, name):
         return attribute
 
 verbose = 1              # Flag set to 0 by regrtest.py
-use_resources = None     # Flag set to [] by regrtest.py
+use_resources = None     # Flag set to {} by regrtest.py
 max_memuse = 0           # Disable bigmem tests (they will still be run with
                          # small sizes, to make sure they work.)
 real_max_memuse = 0
@@ -294,6 +296,16 @@ def is_resource_enabled(resource):
     """
     return use_resources is None or resource in use_resources
 
+def get_resource_value(resource):
+    """Test whether a resource is enabled.
+
+    Known resources are set by regrtest.py.  If not running under regrtest.py,
+    all resources are assumed enabled unless use_resources has been set.
+    """
+    if use_resources is None:
+        return None
+    return use_resources.get(resource)
+
 def requires(resource, msg=None):
     """Raise ResourceDenied if the specified resource is not available."""
     if not is_resource_enabled(resource):
@@ -304,6 +316,16 @@ def requires(resource, msg=None):
         raise ResourceDenied("No socket support")
     if resource == 'gui' and not _is_gui_available():
         raise ResourceDenied(_is_gui_available.reason)
+
+def _get_kernel_version(sysname="Linux"):
+    import platform
+    if platform.system() != sysname:
+        return None
+    version_txt = platform.release().split('-', 1)[0]
+    try:
+        return tuple(map(int, version_txt.split('.')))
+    except ValueError:
+        return None
 
 def _requires_unix_version(sysname, min_version):
     """Decorator raising SkipTest if the OS is `sysname` and the version is less
@@ -519,24 +541,42 @@ def requires_debug_ranges(reason='requires co_positions / debug_ranges'):
         reason = e.args[0] if e.args else reason
     return unittest.skipIf(skip, reason)
 
-@contextlib.contextmanager
-def suppress_immortalization(suppress=True):
-    """Suppress immortalization of deferred objects."""
+
+def can_use_suppress_immortalization(suppress=True):
+    """Check if suppress_immortalization(suppress) can be used.
+
+    Use this helper in code where SkipTest must be eagerly handled.
+    """
+    if not suppress:
+        return True
     try:
         import _testinternalcapi
     except ImportError:
-        yield
-        return
+        return False
+    return True
 
+
+@contextlib.contextmanager
+def suppress_immortalization(suppress=True):
+    """Suppress immortalization of deferred objects.
+
+    If _testinternalcapi is not available, the decorated test or class
+    is skipped. Use can_use_suppress_immortalization() outside test cases
+    to check if this decorator can be used.
+    """
     if not suppress:
-        yield
+        yield  # no-op
         return
 
+    from .import_helper import import_module
+
+    _testinternalcapi = import_module("_testinternalcapi")
     _testinternalcapi.suppress_immortalization(True)
     try:
         yield
     finally:
         _testinternalcapi.suppress_immortalization(False)
+
 
 def skip_if_suppress_immortalization():
     try:
@@ -937,16 +977,29 @@ def subTests(arg_names, arg_values, /, *, _do_cleanups=False):
     def decorator(func):
         if isinstance(func, type):
             raise TypeError('subTests() can only decorate methods, not classes')
-        @functools.wraps(func)
-        def wrapper(self, /, *args, **kwargs):
+
+        def iter_subtest_kwargs():
             for values in arg_values:
-                if single_param:
-                    values = (values,)
-                subtest_kwargs = dict(zip(arg_names, values))
-                with self.subTest(**subtest_kwargs):
-                    func(self, *args, **kwargs, **subtest_kwargs)
-                if _do_cleanups:
-                    self.doCleanups()
+                yield dict(zip(arg_names, (values,) if single_param else values))
+
+        # A synchronous wrapper would discard the coroutine without awaiting
+        # it, so an asynchronous test would not run at all.
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def wrapper(self, /, *args, **kwargs):
+                for subtest_kwargs in iter_subtest_kwargs():
+                    with self.subTest(**subtest_kwargs):
+                        await func(self, *args, **kwargs, **subtest_kwargs)
+                    if _do_cleanups:
+                        self.doCleanups()
+        else:
+            @functools.wraps(func)
+            def wrapper(self, /, *args, **kwargs):
+                for subtest_kwargs in iter_subtest_kwargs():
+                    with self.subTest(**subtest_kwargs):
+                        func(self, *args, **kwargs, **subtest_kwargs)
+                    if _do_cleanups:
+                        self.doCleanups()
         return wrapper
     return decorator
 
@@ -1096,38 +1149,6 @@ def set_memlimit(limit: str) -> None:
     max_memuse = memlimit
 
 
-class _MemoryWatchdog:
-    """An object which periodically watches the process' memory consumption
-    and prints it out.
-    """
-
-    def __init__(self):
-        self.procfile = '/proc/{pid}/statm'.format(pid=os.getpid())
-        self.started = False
-
-    def start(self):
-        import warnings
-        try:
-            f = open(self.procfile, 'r')
-        except OSError as e:
-            logging.getLogger(__name__).warning('/proc not available for stats: %s', e, exc_info=e)
-            sys.stderr.flush()
-            return
-
-        import subprocess
-        with f:
-            watchdog_script = findfile("memory_watchdog.py")
-            self.mem_watchdog = subprocess.Popen([sys.executable, watchdog_script],
-                                                 stdin=f,
-                                                 stderr=subprocess.DEVNULL)
-        self.started = True
-
-    def stop(self):
-        if self.started:
-            self.mem_watchdog.terminate()
-            self.mem_watchdog.wait()
-
-
 def bigmemtest(size, memuse, dry_run=True):
     """Decorator for bigmem tests.
 
@@ -1140,8 +1161,15 @@ def bigmemtest(size, memuse, dry_run=True):
     extra argument. If 'dry_run' is true, the value passed to the test method
     may be less than the requested value. If 'dry_run' is false, it means the
     test doesn't support dummy runs when -M is not specified.
+
+    A test that actually allocates the requested memory (that is, one run with
+    -M) runs in a subprocess, so that the memory it uses and the address space
+    it fragments are released when it ends.  A dummy run stays in the process.
     """
     def decorator(f):
+        from test.support import isolation
+
+        @functools.wraps(f)
         def wrapper(self):
             size = wrapper.size
             memuse = wrapper.memuse
@@ -1156,28 +1184,46 @@ def bigmemtest(size, memuse, dry_run=True):
                     "not enough memory: %.1fG minimum needed"
                     % (size * memuse / (1024 ** 3)))
 
-            if real_max_memuse and verbose:
+            if (real_max_memuse and verbose
+                    and not isolation.runningInSubprocess):
                 print()
-                print(" ... expected peak memory use: {peak:.1f}G"
-                      .format(peak=size * memuse / (1024 ** 3)))
-                watchdog = _MemoryWatchdog()
-                watchdog.start()
-            else:
-                watchdog = None
+                peak = (size * memuse) / (1024 ** 3)
+                print(f" ... expected peak memory use: {peak:.1f} GiB")
 
-            try:
-                return f(self, maxsize)
-            finally:
-                if watchdog:
-                    watchdog.stop()
+            if (real_max_memuse and has_subprocess_support
+                    and not isolation.runningInSubprocess):
+                cls = type(self)
+                qualname = f'{cls.__qualname__}.{f.__name__}'
+                proc = isolation._start_test(cls.__module__, qualname)
+                isolation._replay_test(self, *proc.wait())
+                return
+
+            return f(self, maxsize)
 
         wrapper.size = size
         wrapper.memuse = memuse
         return wrapper
     return decorator
 
+def nomemtest(f):
+    """Check that we can use this test with `_testcapi.set_nomemory`."""
+    from .import_helper import import_module
+
+    @functools.wraps(f)
+    def internal(*args, **kwargs):
+        import_module('_testcapi')
+        return f(*args, **kwargs)
+
+    return unittest.skipIf(
+        # Python built with Py_TRACE_REFS fail with a fatal error in
+        # _PyRefchain_Trace() on memory allocation error.
+        Py_TRACE_REFS,
+        'cannot test Py_TRACE_REFS build',
+    )(cpython_only(internal))
+
 def bigaddrspacetest(f):
     """Decorator for tests that fill the address space."""
+    @functools.wraps(f)
     def wrapper(self):
         if max_memuse < MAX_Py_ssize_t:
             if MAX_Py_ssize_t >= 2**63 - 1 and max_memuse >= 2**31:
@@ -1353,14 +1399,25 @@ print_warning.orig_stderr = sys.stderr
 # to cleanup threads.
 environment_altered = False
 
+# Short descriptions of what was altered, e.g. "unraisable exception".
+# They are reported by regrtest together with the name of the test.
+environment_altered_reasons = []
+
+
+def set_environment_altered(reason):
+    """Set the environment_altered flag and record why it was set."""
+    global environment_altered
+    environment_altered = True
+    if reason not in environment_altered_reasons:
+        environment_altered_reasons.append(reason)
+
+
 def reap_children():
     """Use this function at the end of test_main() whenever sub-processes
     are started.  This will help ensure that no extra children (zombies)
     stick around to hog resources and create problems when looking
     for refleaks.
     """
-    global environment_altered
-
     # Need os.waitpid(-1, os.WNOHANG): Windows is not supported
     if not (hasattr(os, 'waitpid') and hasattr(os, 'WNOHANG')):
         return
@@ -1380,7 +1437,7 @@ def reap_children():
             break
 
         print_warning(f"reap_children() reaped child process {pid}")
-        environment_altered = True
+        set_environment_altered("reaped child process")
 
 
 @contextlib.contextmanager
@@ -2736,7 +2793,7 @@ def no_color():
     from .os_helper import EnvironmentVarGuard
 
     with (
-        swap_attr(_colorize, "can_colorize", lambda file=None: False),
+        swap_attr(_colorize, "can_colorize", lambda *, file=None: False),
         EnvironmentVarGuard() as env,
     ):
         env.unset("FORCE_COLOR", "NO_COLOR", "PYTHON_COLORS")
@@ -2817,3 +2874,25 @@ def linked_to_musl():
     except (OSError, subprocess.CalledProcessError):
         return False
     return ('musl' in stdout)
+
+
+def control_characters_c0() -> list[str]:
+    """Returns a list of C0 control characters as strings.
+    C0 control characters defined as the byte range 0x00-0x1F, and 0x7F.
+    """
+    return [chr(c) for c in range(0x00, 0x20)] + ["\x7F"]
+
+
+STATUS_DLL_INIT_FAILED = 0xC0000142
+def skip_on_low_desktop_heap_memory_subprocess(returncode):
+    if sys.platform not in ('win32', 'cygwin'):
+        return
+    # On Windows, STATUS_DLL_INIT_FAILED is a generic error code that could
+    # come from any of the DLLs being loaded when a new Python process is
+    # created. In practice, it's likely a memory allocation failure in the
+    # desktop heap memory which caused the DLL init failure, especially on
+    # process created with CREATE_NEW_CONSOLE creation flag. See the article:
+    # https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/desktop-heap-limitation-out-of-memory
+    if returncode == STATUS_DLL_INIT_FAILED:
+        raise unittest.SkipTest('gh-150436: DLL init failed, likely because '
+                                'of low desktop heap memory')

@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, reopened, labeled, unlabeled, synchronize]
 
+permissions:
+  contents: read
+
 jobs:
   label:
     name: DO-NOT-MERGE / unresolved review
@@ -14,7 +17,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: mheap/github-action-required-labels@v5
+      - uses: mheap/github-action-required-labels@23e10fde7e062233401931a0eece796cd9bf3177 # v5.6.0
         with:
           mode: exactly
           count: 0

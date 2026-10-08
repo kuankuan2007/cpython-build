@@ -960,6 +960,34 @@ class AST_Tests(unittest.TestCase):
             ):
                 compile(expr, "<test>", "eval")
 
+    def test_constant_in_identifier_fields(self):
+        # gh-85260: an identifier field holding a constant name used to
+        # crash the compiler
+        for statement in [
+            "def x(): pass",
+            "async def x(): pass",
+            "class x: pass",
+            "from a import x",
+            "from a import b as x",
+            "from a import b, c, d as x",
+            "import x",
+            "import a, b, x",
+            "try: pass\nexcept A as x: pass",
+            "try: pass\nexcept A as b: pass\nexcept B as x: pass\n",
+        ]:
+            for constant in "True", "False", "None":
+                with self.subTest(statement=statement, constant=constant):
+                    tree = ast.parse(statement)
+                    for node in ast.walk(tree):
+                        for field, value in ast.iter_fields(node):
+                            if value == "x":
+                                setattr(node, field, constant)
+                    with self.assertRaisesRegex(
+                            ValueError,
+                            f"identifier field can't represent "
+                            f"'{constant}' constant"):
+                        compile(tree, "<test>", "exec")
+
     def test_constant_as_unicode_name(self):
         constants = [
             ("True", b"Tru\xe1\xb5\x89"),
@@ -3119,6 +3147,15 @@ class ASTConstructorTests(unittest.TestCase):
         self.assertEqual(obj.a, 1)
         self.assertEqual(obj.b, 2)
 
+    def test_malformed_fields_with_bytes(self):
+        class BadFields(ast.AST):
+            _fields = (b'\xff'*64,)
+            _field_types = {'a': int}
+
+        # This should not crash
+        with self.assertWarnsRegex(DeprecationWarning, r"Field b'\\xff\\xff.*' .*"):
+            obj = BadFields()
+
     def test_complete_field_types(self):
         class _AllFieldTypes(ast.AST):
             _fields = ("a", "b")
@@ -3131,6 +3168,27 @@ class ASTConstructorTests(unittest.TestCase):
         obj = _AllFieldTypes()
         self.assertIs(obj.a, None)
         self.assertEqual(obj.b, [])
+
+    def test_non_str_kwarg(self):
+        warn_msg = "got an unexpected keyword argument <object object"
+        with (
+            self.assertRaises(TypeError),
+            self.assertWarnsRegex(DeprecationWarning, warn_msg),
+        ):
+            ast.Name(**{object(): 'y'})
+
+        class FakeStr:
+            def __init__(self, value):
+                self.value = value
+
+            def __hash__(self):
+                return hash(self.value)
+
+            def __eq__(self, other):
+                return isinstance(other, str) and self.value == other
+
+        with self.assertRaisesRegex(TypeError, "got multiple values for argument"):
+            ast.Name("x", **{FakeStr('id'): 'y'})
 
 
 @support.cpython_only

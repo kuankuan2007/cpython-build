@@ -238,7 +238,7 @@ tok_underflow_interactive(struct tok_state *tok) {
         PyMem_Free(newtok);
         tok->done = E_EOF;
     }
-    else if (tok->start != NULL) {
+    else if (tok->start != NULL || INSIDE_FSTRING(tok)) {
         Py_ssize_t cur_multi_line_start = tok->multi_line_start - tok->buf;
         _PyLexer_remember_fstring_buffers(tok);
         size_t size = strlen(newtok);
@@ -273,9 +273,6 @@ tok_underflow_interactive(struct tok_state *tok) {
         return 0;
     }
 
-    if (tok->tok_mode_stack_index && !_PyLexer_update_fstring_expr(tok, 0)) {
-        return 0;
-    }
     return 1;
 }
 
@@ -320,10 +317,6 @@ tok_underflow_file(struct tok_state *tok) {
         tok->implicit_newline = 1;
     }
 
-    if (tok->tok_mode_stack_index && !_PyLexer_update_fstring_expr(tok, 0)) {
-        return 0;
-    }
-
     ADVANCE_LINENO();
     if (tok->decoding_state != STATE_NORMAL) {
         if (tok->lineno > 2) {
@@ -355,6 +348,7 @@ _PyTokenizer_FromFile(FILE *fp, const char* enc,
         return NULL;
     if ((tok->buf = (char *)PyMem_Malloc(BUFSIZ)) == NULL) {
         _PyTokenizer_Free(tok);
+        PyErr_NoMemory();
         return NULL;
     }
     tok->cur = tok->inp = tok->buf;

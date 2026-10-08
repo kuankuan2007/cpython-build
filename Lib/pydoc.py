@@ -71,7 +71,6 @@ import sys
 import sysconfig
 import time
 import tokenize
-import urllib.parse
 import warnings
 from collections import deque
 from reprlib import Repr
@@ -574,10 +573,20 @@ class Doc:
              (file.startswith(basedir) and
               not file.startswith(os.path.join(basedir, 'site-packages')))) and
             object.__name__ not in ('xml.etree', 'test.test_pydoc.pydoc_mod')):
-            if docloc.startswith(("http://", "https://")):
-                docloc = "{}/{}.html".format(docloc.rstrip("/"), object.__name__.lower())
+
+            try:
+                from pydoc_data import module_docs
+            except ImportError:
+                module_docs = None
+
+            if module_docs and object.__name__ in module_docs.module_docs:
+                doc_name = module_docs.module_docs[object.__name__]
+                if docloc.startswith(("http://", "https://")):
+                    docloc = "{}/{}".format(docloc.rstrip("/"), doc_name)
+                else:
+                    docloc = os.path.join(docloc, doc_name)
             else:
-                docloc = os.path.join(docloc, object.__name__.lower() + ".html")
+                docloc = None
         else:
             docloc = None
         return docloc
@@ -836,7 +845,8 @@ class HTMLDoc(Doc):
         head = '<strong class="title">%s</strong>' % linkedname
         try:
             path = inspect.getabsfile(object)
-            url = urllib.parse.quote(path)
+            import urllib.request
+            url = urllib.request.pathname2url(path)
             filelink = self.filelink(url, path)
         except TypeError:
             filelink = '(built-in)'
@@ -879,6 +889,7 @@ class HTMLDoc(Doc):
         for key, value in inspect.getmembers(object, inspect.isroutine):
             # if __all__ exists, believe it.  Otherwise use a heuristic.
             if (all is not None
+                or inspect.isbuiltin(value)
                 or (inspect.getmodule(value) or object) is object):
                 if visiblename(key, all, object):
                     funcs.append((key, value))
@@ -1323,6 +1334,7 @@ location listed above.
         for key, value in inspect.getmembers(object, inspect.isroutine):
             # if __all__ exists, believe it.  Otherwise use a heuristic.
             if (all is not None
+                or inspect.isbuiltin(value)
                 or (inspect.getmodule(value) or object) is object):
                 if visiblename(key, all, object):
                     funcs.append((key, value))
@@ -1786,7 +1798,8 @@ def writedoc(thing, forceload=0):
     """Write HTML documentation to a file in the current directory."""
     object, name = resolve(thing, forceload)
     page = html.page(describe(object), html.document(object, name))
-    with open(name + '.html', 'w', encoding='utf-8') as file:
+    with open(name + '.html', 'w', encoding='utf-8',
+              errors='backslashreplace') as file:
         file.write(page)
     print('wrote', name + '.html')
 
@@ -1820,6 +1833,7 @@ class Helper:
         'async': ('async', ''),
         'await': ('await', ''),
         'break': ('break', 'while for'),
+        'case': 'match',
         'class': ('class', 'CLASSES SPECIALMETHODS'),
         'continue': ('continue', 'while for'),
         'def': ('function', ''),
@@ -1831,11 +1845,12 @@ class Helper:
         'for': ('for', 'break continue while'),
         'from': 'import',
         'global': ('global', 'nonlocal NAMESPACES'),
-        'if': ('if', 'TRUTHVALUE'),
+        'if': ('if', 'TRUTHVALUE match'),
         'import': ('import', 'MODULES'),
         'in': ('in', 'SEQUENCEMETHODS'),
         'is': 'COMPARISON',
         'lambda': ('lambda', 'FUNCTIONS'),
+        'match': ('match', 'if'),
         'nonlocal': ('nonlocal', 'global NAMESPACES'),
         'not': 'BOOLEAN',
         'or': 'BOOLEAN',
@@ -2016,10 +2031,11 @@ has the same effect as typing a particular string at the help> prompt.
         while True:
             try:
                 request = self.getline('help> ')
-                if not request: break
             except (KeyboardInterrupt, EOFError):
                 break
             request = request.strip()
+            if not request:
+                continue  # back to the prompt
 
             # Make sure significant trailing quoting marks of literals don't
             # get deleted while cleaning input
@@ -2366,7 +2382,7 @@ def _start_server(urlhandler, hostname, port):
             self.send_header('Content-Type', '%s; charset=UTF-8' % content_type)
             self.end_headers()
             self.wfile.write(self.urlhandler(
-                self.path, content_type).encode('utf-8'))
+                self.path, content_type).encode('utf-8', 'backslashreplace'))
 
         def log_message(self, *args):
             # Don't log messages.

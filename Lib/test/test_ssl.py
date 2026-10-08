@@ -1,5 +1,6 @@
 # Test the support for SSL and sockets
 
+import contextlib
 import sys
 import unittest
 import unittest.mock
@@ -47,8 +48,19 @@ Py_DEBUG_WIN32 = support.Py_DEBUG and sys.platform == 'win32'
 
 PROTOCOLS = sorted(ssl._PROTOCOL_NAMES)
 HOST = socket_helper.HOST
+IS_AWS_LC = "AWS-LC" in ssl.OPENSSL_VERSION
 IS_OPENSSL_3_0_0 = ssl.OPENSSL_VERSION_INFO >= (3, 0, 0)
 PY_SSL_DEFAULT_CIPHERS = sysconfig.get_config_var('PY_SSL_DEFAULT_CIPHERS')
+
+HAS_KEYLOG = hasattr(ssl.SSLContext, 'keylog_filename')
+requires_keylog = unittest.skipUnless(
+    HAS_KEYLOG, 'test requires OpenSSL 1.1.1 with keylog callback')
+CAN_SET_KEYLOG = HAS_KEYLOG and os.name != "nt"
+requires_keylog_setter = unittest.skipUnless(
+    CAN_SET_KEYLOG,
+    "cannot set 'keylog_filename' on Windows"
+)
+
 
 PROTOCOL_TO_TLS_VERSION = {}
 for proto, ver in (
@@ -286,26 +298,67 @@ ignore_deprecation = warnings_helper.ignore_warnings(
 )
 
 
-def test_wrap_socket(sock, *,
-                     cert_reqs=ssl.CERT_NONE, ca_certs=None,
-                     ciphers=None, certfile=None, keyfile=None,
-                     **kwargs):
-    if not kwargs.get("server_side"):
-        kwargs["server_hostname"] = SIGNED_CERTFILE_HOSTNAME
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    else:
+def make_test_context(
+    *,
+    server_side=False,
+    check_hostname=None,
+    cert_reqs=ssl.CERT_NONE,
+    ca_certs=None, certfile=None, keyfile=None,
+    ciphers=None,
+    min_version=None, max_version=None,
+):
+    if server_side:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    if cert_reqs is not None:
+    else:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    if check_hostname is None:
         if cert_reqs == ssl.CERT_NONE:
             context.check_hostname = False
+    else:
+        context.check_hostname = check_hostname
+
+    if cert_reqs is not None:
         context.verify_mode = cert_reqs
+
     if ca_certs is not None:
         context.load_verify_locations(ca_certs)
     if certfile is not None or keyfile is not None:
         context.load_cert_chain(certfile, keyfile)
+
     if ciphers is not None:
         context.set_ciphers(ciphers)
-    return context.wrap_socket(sock, **kwargs)
+
+    if min_version is not None:
+        context.minimum_version = min_version
+    if max_version is not None:
+        context.maximum_version = max_version
+
+    return context
+
+
+def test_wrap_socket(
+    sock,
+    *,
+    server_side=False,
+    check_hostname=None,
+    cert_reqs=ssl.CERT_NONE,
+    ca_certs=None, certfile=None, keyfile=None,
+    ciphers=None,
+    min_version=None, max_version=None,
+    **kwargs,
+):
+    context = make_test_context(
+        server_side=server_side,
+        check_hostname=check_hostname,
+        cert_reqs=cert_reqs,
+        ca_certs=ca_certs, certfile=certfile, keyfile=keyfile,
+        ciphers=ciphers,
+        min_version=min_version, max_version=max_version,
+    )
+    if not server_side:
+        kwargs.setdefault("server_hostname", SIGNED_CERTFILE_HOSTNAME)
+    return context.wrap_socket(sock, server_side=server_side, **kwargs)
 
 
 USE_SAME_TEST_CONTEXT = False
@@ -343,6 +396,48 @@ def testing_context(server_cert=SIGNED_CERTFILE, *, server_chain=True):
             _TEST_CONTEXT = client_context, server_context, hostname
 
     return client_context, server_context, hostname
+
+
+def do_ssl_object_handshake(sslobject, outgoing, max_retry=25):
+    """Call do_handshake() on the sslobject and return the sent data.
+
+    If do_handshake() fails more than *max_retry* times, return None.
+    """
+    data, attempt = None, 0
+    while not data and attempt < max_retry:
+        with contextlib.suppress(ssl.SSLWantReadError):
+            sslobject.do_handshake()
+        data = outgoing.read()
+        attempt += 1
+    return data
+
+
+def connected_bio_pair(client_context, server_context, hostname, max_retry=5):
+    """Handshake a client and a server SSLObject against each other.
+
+    Everything happens in memory, so this needs no socket and no thread.
+    Returns the two objects followed by their four BIOs, in the order
+    client, server, c_in, c_out, s_in, s_out.
+    """
+    c_in, c_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+    s_in, s_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+    client = client_context.wrap_bio(c_in, c_out, server_hostname=hostname)
+    server = server_context.wrap_bio(s_in, s_out, server_side=True)
+
+    # Loop on the handshake for a bit to get it settled
+    for _ in range(max_retry):
+        with contextlib.suppress(ssl.SSLWantReadError):
+            client.do_handshake()
+        if c_out.pending:
+            s_in.write(c_out.read())
+        with contextlib.suppress(ssl.SSLWantReadError):
+            server.do_handshake()
+        if s_out.pending:
+            c_in.write(s_out.read())
+    # Now the handshakes should be complete (don't raise WantReadError)
+    client.do_handshake()
+    server.do_handshake()
+    return client, server, c_in, c_out, s_in, s_out
 
 
 class BasicSocketTests(unittest.TestCase):
@@ -1112,7 +1207,12 @@ class ContextTests(unittest.TestCase):
         ctx.maximum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
         self.assertIn(
             ctx.maximum_version,
-            {ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1, ssl.TLSVersion.SSLv3}
+            {
+                ssl.TLSVersion.TLSv1,
+                ssl.TLSVersion.TLSv1_1,
+                ssl.TLSVersion.TLSv1_2,
+                ssl.TLSVersion.SSLv3,
+            }
         )
 
         ctx.minimum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
@@ -1434,6 +1534,49 @@ class ContextTests(unittest.TestCase):
         ctx.set_servername_callback(None)
         ctx.set_servername_callback(dummycallback)
 
+    def test_sni_callback_on_dead_references(self):
+        # See https://github.com/python/cpython/issues/146080.
+        c_ctx = make_test_context()
+        c_inc, c_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = c_ctx.wrap_bio(c_inc, c_out, server_hostname=SIGNED_CERTFILE_HOSTNAME)
+
+        def sni_callback(sock, servername, ctx): pass
+        sni_callback = unittest.mock.Mock(wraps=sni_callback)
+        s_ctx = make_test_context(server_side=True, certfile=SIGNED_CERTFILE)
+        s_ctx.set_servername_callback(sni_callback)
+
+        s_inc, s_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        server = s_ctx.wrap_bio(s_inc, s_out, server_side=True)
+        server_impl = server._sslobj
+
+        # Perform the handshake on the client side first.
+        data = do_ssl_object_handshake(client, c_out)
+        sni_callback.assert_not_called()
+        if data is None:
+            self.skipTest("cannot establish a handshake from the client")
+        s_inc.write(data)
+        sni_callback.assert_not_called()
+        # Delete the server object before it starts doing its handshake
+        # and ensure that we did not call the SNI callback yet.
+        del server
+        gc.collect()
+        # Try to continue the server's handshake by directly using
+        # the internal SSL object. The latter is a weak reference
+        # stored in the server context and has now a dead owner.
+        with self.assertRaises(ssl.SSLError) as cm:
+            server_impl.do_handshake()
+        # The SNI C callback raised an exception before calling our callback.
+        sni_callback.assert_not_called()
+
+        # In AWS-LC, any handshake failures reports SSL_R_PARSE_TLSEXT,
+        # while OpenSSL uses SSL_R_CALLBACK_FAILED on SNI callback failures.
+        if IS_AWS_LC:
+            libssl_error_reason = "PARSE_TLSEXT"
+        else:
+            libssl_error_reason = "callback failed"
+        self.assertIn(libssl_error_reason, str(cm.exception))
+        self.assertEqual(cm.exception.errno, ssl.SSL_ERROR_SSL)
+
     def test_sni_callback_refcycle(self):
         # Reference cycles through the servername callback are detected
         # and cleared.
@@ -1600,6 +1743,62 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
         self._assert_context_options(ctx)
 
+    def test__create_stdlib_context_check_hostname(self):
+        # gh-114905: check_hostname cannot be combined with CERT_NONE,
+        # the default for cert_reqs.
+        msg = "Cannot set verify_mode to CERT_NONE when check_hostname"
+        with self.assertRaisesRegex(ValueError, msg):
+            ssl._create_stdlib_context(check_hostname=True)
+        with self.assertRaisesRegex(ValueError, msg):
+            ssl._create_stdlib_context(cert_reqs=ssl.CERT_NONE,
+                                       check_hostname=True)
+
+        # Accepted before 3.10 with a legacy protocol.
+        if has_tls_protocol('PROTOCOL_TLSv1_2'):
+            with warnings_helper.check_warnings():
+                with self.assertRaisesRegex(ValueError, msg):
+                    ssl._create_stdlib_context(ssl.PROTOCOL_TLSv1_2,
+                                               cert_reqs=ssl.CERT_NONE,
+                                               check_hostname=True)
+
+        # cert_reqs=None leaves PROTOCOL_TLS_CLIENT's CERT_REQUIRED.
+        ctx = ssl._create_stdlib_context(cert_reqs=None, check_hostname=True)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
+        # CERT_REQUIRED is covered by test__create_stdlib_context().
+        ctx = ssl._create_stdlib_context(cert_reqs=ssl.CERT_OPTIONAL,
+                                         check_hostname=True)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_OPTIONAL)
+        self.assertTrue(ctx.check_hostname)
+
+    def test_delete_sslobject_attributes(self):
+        # None of the attributes of _ssl._SSLSocket can be deleted.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        sslobj = ctx.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO())._sslobj
+        for name in 'context', 'owner', 'session', 'session_reused':
+            with self.subTest(name=name):
+                value = getattr(sslobj, name)
+                with self.assertRaises(AttributeError):
+                    delattr(sslobj, name)
+                self.assertEqual(getattr(sslobj, name), value)
+
+    def test_delete_attributes(self):
+        # None of the attributes implemented in C can be deleted.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        names = ['check_hostname', 'verify_mode', 'verify_flags', 'options',
+                 'minimum_version', 'maximum_version', 'sni_callback',
+                 '_host_flags', 'security_level', 'post_handshake_auth']
+        if hasattr(ctx, 'num_tickets'):
+            names.append('num_tickets')
+        for name in names:
+            with self.subTest(name=name):
+                value = getattr(ctx, name)
+                with self.assertRaises(AttributeError):
+                    delattr(ctx, name)
+                self.assertEqual(getattr(ctx, name), value)
+
     def test_check_hostname(self):
         with warnings_helper.check_warnings():
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
@@ -1688,6 +1887,39 @@ class ContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ctx.num_tickets = 1
 
+    @support.cpython_only
+    def test_refcycle_msg_callback(self):
+        # See https://github.com/python/cpython/issues/142516.
+        ctx = make_test_context()
+        def msg_callback(*args, _=ctx, **kwargs): ...
+        ctx._msg_callback = msg_callback
+
+    @support.cpython_only
+    @requires_keylog_setter
+    def test_refcycle_keylog_filename(self):
+        # See https://github.com/python/cpython/issues/142516.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        ctx = make_test_context()
+        class KeylogFilename(str): ...
+        ctx.keylog_filename = KeylogFilename(os_helper.TESTFN)
+        ctx.keylog_filename._ = ctx
+
+    @support.cpython_only
+    @unittest.skipUnless(ssl.HAS_PSK, 'requires TLS-PSK')
+    def test_refcycle_psk_client_callback(self):
+        # See https://github.com/python/cpython/issues/142516.
+        ctx = make_test_context()
+        def psk_client_callback(*args, _=ctx, **kwargs): ...
+        ctx.set_psk_client_callback(psk_client_callback)
+
+    @support.cpython_only
+    @unittest.skipUnless(ssl.HAS_PSK, 'requires TLS-PSK')
+    def test_refcycle_psk_server_callback(self):
+        # See https://github.com/python/cpython/issues/142516.
+        ctx = make_test_context(server_side=True)
+        def psk_server_callback(*args, _=ctx, **kwargs): ...
+        ctx.set_psk_server_callback(psk_server_callback)
+
 
 class SSLErrorTests(unittest.TestCase):
 
@@ -1738,6 +1970,10 @@ class SSLErrorTests(unittest.TestCase):
 
     def test_bad_server_hostname(self):
         ctx = ssl.create_default_context()
+        # Omitting the name entirely is bad too: this context checks it.
+        with self.assertRaises(ValueError):
+            ctx.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                         server_hostname=None)
         with self.assertRaises(ValueError):
             ctx.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
                          server_hostname="")
@@ -1822,6 +2058,64 @@ class SSLObjectTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "public constructor"):
             ssl.SSLObject(bio, bio)
 
+    def test_check_hostname_requires_server_hostname(self):
+        # wrap_bio() used to accept a context asking for hostname checking
+        # without a name to check against, and then verify the certificate
+        # chain but never the peer's identity, with check_hostname still
+        # reporting True and nothing reporting the check had been skipped.
+        # It must refuse that call, as wrap_socket() already did.
+        client_context, _, hostname = testing_context()
+        self.assertTrue(client_context.check_hostname)
+
+        for server_hostname in (None, ""):
+            with self.subTest(server_hostname=server_hostname):
+                with self.assertRaisesRegex(
+                        ValueError,
+                        "check_hostname requires server_hostname"):
+                    client_context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                            server_hostname=server_hostname)
+                # The sibling constructor refuses the very same call.
+                with socket.socket() as sock:
+                    with self.assertRaisesRegex(
+                            ValueError,
+                            "check_hostname requires server_hostname"):
+                        client_context.wrap_socket(
+                            sock, server_hostname=server_hostname)
+
+        # A name was all that was missing.
+        client_context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                server_hostname=hostname)
+
+        # Asking for no hostname check remains a way to say so explicitly.
+        context = make_test_context()
+        self.assertFalse(context.check_hostname)
+        context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO())
+
+    def test_server_side_bad_params(self):
+        # A server neither sends a hostname nor resumes a client's session,
+        # so wrap_bio() rejects both in server mode like wrap_socket()
+        client_context, server_context, hostname = testing_context()
+
+        with self.assertRaisesRegex(
+                ValueError,
+                "server_hostname can only be specified in client mode"):
+            server_context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                    server_side=True,
+                                    server_hostname=hostname)
+
+        client, server, *_ = connected_bio_pair(
+            client_context, server_context, hostname)
+        session = client.session
+        self.assertIsNotNone(session)
+        with self.assertRaisesRegex(
+                ValueError, "session can only be specified in client mode"):
+            server_context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                    server_side=True, session=session)
+
+        # Neither argument is what a server passes, so this still works.
+        server_context.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                server_side=True)
+
     def test_unwrap(self):
         client_ctx, server_ctx, hostname = testing_context()
         c_in = ssl.MemoryBIO()
@@ -1863,6 +2157,86 @@ class SSLObjectTests(unittest.TestCase):
         # raise either.
         c_in.write(s_out.read())
         client.unwrap()
+
+    def test_sni_callback_context_released_and_callback_raises(self):
+        # Variant of the test below without a HelloRetryRequest: the callback
+        # switches the connection to another context, drops the last
+        # references to the context that carries it, and raises.  The C
+        # callback must not touch that context after the Python callback
+        # returned.
+        client_ctx, server_ctx, hostname = testing_context()
+        leaf_ctx = server_ctx
+
+        def sni_cb(sslobj, server_name, ctx):
+            sslobj.context = leaf_ctx
+            del ctx
+            raise LookupError("no certificate for " + repr(server_name))
+
+        def make_server():
+            dispatch_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            dispatch_ctx.load_cert_chain(SIGNED_CERTFILE)
+            dispatch_ctx.sni_callback = sni_cb
+            s_in, s_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+            server = dispatch_ctx.wrap_bio(s_in, s_out, server_side=True)
+            return server, s_in, s_out
+
+        server, s_in, s_out = make_server()
+        c_in, c_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = client_ctx.wrap_bio(c_in, c_out, server_hostname=hostname)
+        with self.assertRaises(ssl.SSLWantReadError):
+            client.do_handshake()
+        s_in.write(c_out.read())
+        with support.catch_unraisable_exception() as cm:
+            with self.assertRaises(ssl.SSLError):
+                server.do_handshake()
+            self.assertIsInstance(cm.unraisable.exc_value, LookupError)
+        self.assertIs(server.context, leaf_ctx)
+
+    def test_sni_callback_context_released_before_second_client_hello(self):
+        # The SSLContext carrying sni_callback may be released by the
+        # application once the callback has switched the connection over to
+        # another context.  If the server then sends a HelloRetryRequest, the
+        # second ClientHello makes OpenSSL consult the original SSL_CTX's
+        # servername callback again; that must not use the deallocated
+        # SSLContext object.
+        client_ctx, leaf_ctx, hostname = testing_context()
+        calls = []
+
+        def make_server():
+            dispatch_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            dispatch_ctx.load_cert_chain(SIGNED_CERTFILE)
+            # Force a HelloRetryRequest: the client offers an X25519 key
+            # share first, the server only accepts P-384.
+            dispatch_ctx.set_ecdh_curve("secp384r1")
+            def sni_cb(sslobj, server_name, ctx):
+                calls.append(server_name)
+                sslobj.context = leaf_ctx
+            dispatch_ctx.sni_callback = sni_cb
+            s_in, s_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+            server = dispatch_ctx.wrap_bio(s_in, s_out, server_side=True)
+            return server, s_in, s_out, weakref.ref(dispatch_ctx)
+
+        # After this only the C-level SSL object references dispatch_ctx.
+        server, s_in, s_out, dispatch_ref = make_server()
+        c_in, c_out = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = client_ctx.wrap_bio(c_in, c_out, server_hostname=hostname)
+        for _ in range(10):
+            for obj, out, peer_in in ((client, c_out, s_in),
+                                      (server, s_out, c_in)):
+                try:
+                    obj.do_handshake()
+                except ssl.SSLWantReadError:
+                    pass
+                if out.pending:
+                    peer_in.write(out.read())
+        client.do_handshake()
+        server.do_handshake()
+        support.gc_collect()
+        self.assertIsNone(dispatch_ref())
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertEqual(calls[0], hostname)
+        self.assertIs(server.context, leaf_ctx)
+        self.assertIsNotNone(client.cipher())
 
 class SimpleBackgroundTests(unittest.TestCase):
     """Tests that connect to a simple server running in the background"""
@@ -4935,10 +5309,6 @@ class TestPostHandshakeAuth(unittest.TestCase):
                 self.assertEqual(res, b'\x02\n')
 
 
-HAS_KEYLOG = hasattr(ssl.SSLContext, 'keylog_filename')
-requires_keylog = unittest.skipUnless(
-    HAS_KEYLOG, 'test requires OpenSSL 1.1.1 with keylog callback')
-
 class TestSSLDebug(unittest.TestCase):
 
     def keylog_lines(self, fname=os_helper.TESTFN):
@@ -4972,6 +5342,12 @@ class TestSSLDebug(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             ctx.keylog_filename = 1
+
+        ctx.keylog_filename = os_helper.TESTFN
+        with self.assertRaisesRegex(AttributeError, 'cannot be deleted'):
+            del ctx.keylog_filename
+        # a failed deletion does not change the value
+        self.assertEqual(ctx.keylog_filename, os_helper.TESTFN)
 
     @requires_keylog
     def test_keylog_filename(self):
@@ -5048,6 +5424,18 @@ class TestSSLDebug(unittest.TestCase):
         self.assertIs(client_context._msg_callback, msg_cb)
         with self.assertRaises(TypeError):
             client_context._msg_callback = object()
+
+        # the attribute of the underlying C type accepts only a callable
+        # and cannot be deleted
+        descr = _ssl._SSLContext.__dict__['_msg_callback']
+        with self.assertRaises(TypeError):
+            descr.__set__(client_context, object())
+        # a failed assignment does not change the value
+        self.assertIs(client_context._msg_callback, msg_cb)
+        with self.assertRaisesRegex(AttributeError, 'cannot be deleted'):
+            descr.__delete__(client_context)
+        # a failed deletion does not change the value
+        self.assertIs(client_context._msg_callback, msg_cb)
 
     def test_msg_callback_tls12(self):
         client_context, server_context, hostname = testing_context()
@@ -5176,15 +5564,27 @@ class TestPreHandshakeClose(unittest.TestCase):
             return  # Expect the full test setup to always work on Linux.
         if (isinstance(err, ConnectionResetError) or
             (isinstance(err, OSError) and err.errno == errno.EINVAL) or
-            re.search('wrong.version.number', str(getattr(err, "reason", "")), re.I)):
+            re.search(
+                # Matches the following error messages:
+                # '[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1123)'
+                # '[SSL: RECORD_LAYER_FAILURE] record layer failure (_ssl.c:1109)'
+                # '[SSL: HTTP_REQUEST] http request (_ssl.c:1143)'
+                r'wrong.version.number|record.layer.failure|http.request',
+                str(getattr(err, "reason", "")),
+                re.IGNORECASE,
+            )
+        ):
             # On Windows the TCP RST leads to a ConnectionResetError
             # (ECONNRESET) which Linux doesn't appear to surface to userspace.
             # If wrap_socket() winds up on the "if connected:" path and doing
-            # the actual wrapping... we get an SSLError from OpenSSL. Typically
-            # WRONG_VERSION_NUMBER. While appropriate, neither is the scenario
-            # we're specifically trying to test. The way this test is written
-            # is known to work on Linux. We'll skip it anywhere else that it
-            # does not present as doing so.
+            # the actual wrapping... we get an SSLError from OpenSSL. This is
+            # typically WRONG_VERSION_NUMBER. The same happens on iOS, but
+            # RECORD_LAYER_FAILURE or HTTP_REQUEST is the error.
+            #
+            # While appropriate, these scenarios aren't what we're specifically
+            # trying to test. The way this test is written is known to work on
+            # Linux. We'll skip it anywhere else that it does not present as
+            # doing so.
             try:
                 self.skipTest(f"Could not recreate conditions on {sys.platform}:"
                               f" {err=}")
@@ -5385,7 +5785,7 @@ class TestEnumerations(unittest.TestCase):
         class Checked_TLSAlertType(enum.IntEnum):
             """Alert types for TLSContentType.ALERT messages
 
-            See RFC 8466, section B.2
+            See RFC 8446, section B.2
             """
             CLOSE_NOTIFY = 0
             UNEXPECTED_MESSAGE = 10

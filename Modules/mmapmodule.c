@@ -120,6 +120,7 @@ typedef struct {
 #ifdef UNIX
     int fd;
     _Bool trackfd;
+    int flags;
 #endif
 
     PyObject *weakreflist;
@@ -871,6 +872,16 @@ mmap_resize_method(mmap_object *self,
 #else
         void *newmap;
 
+#if defined(__linux__) || defined(__NetBSD__)
+        // Linux mremap() refuses to grow a shared anonymous mapping, and
+        // NetBSD mremap() returns a mapping whose grown region is not backed,
+        // so accessing it crashes.  Reject it here in both cases.
+        if (self->fd == -1 && !(self->flags & MAP_PRIVATE) && new_size > self->size) {
+            PyErr_Format(PyExc_ValueError,
+                "mmap: can't expand a shared anonymous mapping");
+            return NULL;
+        }
+#endif
         if (self->fd != -1 && ftruncate(self->fd, self->offset + new_size) == -1) {
             PyErr_SetFromErrno(PyExc_OSError);
             return NULL;
@@ -1336,24 +1347,14 @@ mmap_ass_item(mmap_object *self, Py_ssize_t i, PyObject *v)
 static int
 mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
 {
-    CHECK_VALID(-1);
-
     if (!is_writable(self))
         return -1;
 
     if (PyIndex_Check(item)) {
         Py_ssize_t i = PyNumber_AsSsize_t(item, PyExc_IndexError);
-        Py_ssize_t v;
-
         if (i == -1 && PyErr_Occurred())
             return -1;
-        if (i < 0)
-            i += self->size;
-        if (i < 0 || i >= self->size) {
-            PyErr_SetString(PyExc_IndexError,
-                            "mmap index out of range");
-            return -1;
-        }
+
         if (value == NULL) {
             PyErr_SetString(PyExc_TypeError,
                             "mmap doesn't support item deletion");
@@ -1364,7 +1365,7 @@ mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
                             "mmap item value must be an int");
             return -1;
         }
-        v = PyNumber_AsSsize_t(value, PyExc_TypeError);
+        Py_ssize_t v = PyNumber_AsSsize_t(value, PyExc_TypeError);
         if (v == -1 && PyErr_Occurred())
             return -1;
         if (v < 0 || v > 255) {
@@ -1373,7 +1374,18 @@ mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
                             "in range(0, 256)");
             return -1;
         }
+
+        /* Converting item or value above may have run arbitrary code
+         * (e.g. __index__) that resized or closed the mmap, so bounds
+         * are only checked now, against the current size. */
         CHECK_VALID(-1);
+        if (i < 0)
+            i += self->size;
+        if (i < 0 || i >= self->size) {
+            PyErr_SetString(PyExc_IndexError,
+                            "mmap index out of range");
+            return -1;
+        }
 
         char v_char = (char) v;
         if (safe_byte_copy(self->data + i, &v_char) < 0) {
@@ -1388,7 +1400,6 @@ mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
         if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
             return -1;
         }
-        slicelen = PySlice_AdjustIndices(self->size, &start, &stop, step);
         if (value == NULL) {
             PyErr_SetString(PyExc_TypeError,
                 "mmap object doesn't support slice deletion");
@@ -1396,6 +1407,12 @@ mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
         }
         if (PyObject_GetBuffer(value, &vbuf, PyBUF_SIMPLE) < 0)
             return -1;
+
+        /* Acquiring the buffer above may have run arbitrary code (e.g. a
+         * __buffer__ method) that resized or closed this mmap, so the slice bounds
+         * are only computed now, against the current size. */
+        CHECK_VALID_OR_RELEASE(-1, vbuf);
+        slicelen = PySlice_AdjustIndices(self->size, &start, &stop, step);
         if (vbuf.len != slicelen) {
             PyErr_SetString(PyExc_IndexError,
                 "mmap slice assignment is wrong size");
@@ -1403,7 +1420,6 @@ mmap_ass_subscript(mmap_object *self, PyObject *item, PyObject *value)
             return -1;
         }
 
-        CHECK_VALID_OR_RELEASE(-1, vbuf);
         int result = 0;
         if (slicelen == 0) {
         }
@@ -1651,6 +1667,7 @@ new_mmap_object(PyTypeObject *type, PyObject *args, PyObject *kwdict)
     else {
         m_obj->fd = -1;
     }
+    m_obj->flags = flags;
 
     Py_BEGIN_ALLOW_THREADS
     m_obj->data = mmap(NULL, map_size, prot, flags, fd, offset);

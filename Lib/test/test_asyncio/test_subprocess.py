@@ -11,7 +11,7 @@ from asyncio import base_subprocess
 from asyncio import subprocess
 from test.test_asyncio import utils as test_utils
 from test import support
-from test.support import os_helper
+from test.support import os_helper, warnings_helper, gc_collect
 
 if not support.has_subprocess_support:
     raise unittest.SkipTest("test module requires subprocess")
@@ -219,7 +219,7 @@ class SubprocessMixin:
             # kills the process and all its children.
             creationflags = CREATE_NEW_PROCESS_GROUP
         proc = self.loop.run_until_complete(
-            asyncio.create_subprocess_shell(blocking_shell_command, stdout=asyncio.subprocess.PIPE,
+            asyncio.create_subprocess_shell(blocking_shell_command,
             creationflags=creationflags)
         )
         self.loop.run_until_complete(asyncio.sleep(1))
@@ -403,6 +403,46 @@ class SubprocessMixin:
         output, exitcode = self.loop.run_until_complete(len_message(b'abc'))
         self.assertEqual(output.rstrip(), b'3')
         self.assertEqual(exitcode, 0)
+
+    def test_wait_even_if_pipe_is_open(self):
+        # gh-119710: Process.wait() must return once the process exits even
+        # if its stdout pipe is inherited by a grandchild that keeps it open,
+        # so the pipe never reaches EOF. Otherwise wait() hangs forever
+        # despite the returncode being known.
+
+        async def run():
+            # The grandchild inherits the child's stdin and stdout pipes and
+            # keeps both open after the child is killed.  It writes "ready"
+            # so we know it has started, and exits once its stdin hits EOF.
+            code = textwrap.dedent("""\
+                import subprocess, sys
+                subprocess.run([sys.executable, "-c",
+                    "import sys; sys.stdout.write('ready');"
+                    " sys.stdout.flush(); sys.stdin.read()"])
+                """)
+
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", code,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            )
+            try:
+                wait_proc = asyncio.create_task(proc.wait())
+                # Wait until the grandchild holds the inherited pipes; this
+                # also lets the wait() task register its waiter.
+                await proc.stdout.readexactly(5)
+                proc.kill()
+                returncode = await asyncio.wait_for(
+                    wait_proc, timeout=support.SHORT_TIMEOUT)
+                if sys.platform == 'win32':
+                    self.assertIsInstance(returncode, int)
+                else:
+                    self.assertEqual(-signal.SIGKILL, returncode)
+            finally:
+                proc.stdin.close()  # let the grandchild exit
+                await proc.stdout.read()
+
+        self.loop.run_until_complete(run())
 
     def test_empty_input(self):
 
@@ -888,6 +928,44 @@ class SubprocessMixin:
 
         self.loop.run_until_complete(main())
 
+    @warnings_helper.ignore_warnings(category=ResourceWarning)
+    def test_subprocess_read_pipe_cancelled(self):
+        async def main():
+            loop = asyncio.get_running_loop()
+            loop.connect_read_pipe = mock.AsyncMock(side_effect=asyncio.CancelledError)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.create_subprocess_exec(*PROGRAM_BLOCKED, stderr=asyncio.subprocess.PIPE)
+
+        asyncio.run(main())
+        gc_collect()
+
+    @warnings_helper.ignore_warnings(category=ResourceWarning)
+    def test_subprocess_write_pipe_cancelled(self):
+        async def main():
+            loop = asyncio.get_running_loop()
+            loop.connect_write_pipe = mock.AsyncMock(side_effect=asyncio.CancelledError)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.create_subprocess_exec(*PROGRAM_BLOCKED, stdin=asyncio.subprocess.PIPE)
+
+        asyncio.run(main())
+        gc_collect()
+
+    @warnings_helper.ignore_warnings(category=ResourceWarning)
+    def test_subprocess_read_write_pipe_cancelled(self):
+        async def main():
+            loop = asyncio.get_running_loop()
+            loop.connect_read_pipe = mock.AsyncMock(side_effect=asyncio.CancelledError)
+            loop.connect_write_pipe = mock.AsyncMock(side_effect=asyncio.CancelledError)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.create_subprocess_exec(
+                    *PROGRAM_BLOCKED,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+        asyncio.run(main())
+        gc_collect()
 
 if sys.platform != 'win32':
     # Unix

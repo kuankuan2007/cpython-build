@@ -21,6 +21,9 @@ extern "C" {
  * 2**32 - 1, rather than INT_MAX.
  */
 
+#ifdef _AIX
+#pragma pack(push, 1)
+#endif
 typedef union {
     uint16_t cache;
     struct {
@@ -29,6 +32,9 @@ typedef union {
     } op;
     _Py_BackoffCounter counter;  // First cache entry of specializable op
 } _Py_CODEUNIT;
+#ifdef _AIX
+#pragma pack(pop)
+#endif
 
 #define _PyCode_CODE(CO) _Py_RVALUE((_Py_CODEUNIT *)(CO)->co_code_adaptive)
 #define _PyCode_NBYTES(CO) (Py_SIZE(CO) * (Py_ssize_t)sizeof(_Py_CODEUNIT))
@@ -307,6 +313,13 @@ extern void _PyLineTable_InitAddressRange(
 /** API for traversing the line number table. */
 extern int _PyLineTable_NextAddressRange(PyCodeAddressRange *range);
 extern int _PyLineTable_PreviousAddressRange(PyCodeAddressRange *range);
+
+// Similar to PyCode_Addr2Line(), but return -1 if the code object is invalid
+// and can be called without an attached tstate. Used by dump_frame() in
+// Python/traceback.c. The function uses heuristics to detect freed memory,
+// it's not 100% reliable.
+extern int _PyCode_SafeAddr2Line(PyCodeObject *co, int addr);
+
 
 /** API for executors */
 extern void _PyCode_Clear_Executors(PyCodeObject *code);

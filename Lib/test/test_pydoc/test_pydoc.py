@@ -20,6 +20,7 @@ import typing
 import unittest
 import unittest.mock
 import urllib.parse
+import urllib.request
 import xml.etree
 import xml.etree.ElementTree
 import textwrap
@@ -433,7 +434,7 @@ class PydocDocTest(unittest.TestCase):
         expected_lines = [line.strip() for line in expected_lines if line]
         self.assertEqual(text_lines, expected_lines)
         mod_file = inspect.getabsfile(pydoc_mod)
-        mod_url = urllib.parse.quote(mod_file)
+        mod_url = urllib.request.pathname2url(mod_file)
         self.assertIn(mod_url, result)
         self.assertIn(mod_file, result)
         self.assertIn(doc_loc, result)
@@ -468,6 +469,32 @@ class PydocDocTest(unittest.TestCase):
         # Test issue8225 to ensure no doc link appears for xml.etree
         result, doc_loc = get_pydoc_text(xml.etree)
         self.assertEqual(doc_loc, "", "MODULE DOCS incorrectly includes a link")
+
+    def test_online_docs_link(self):
+        import encodings.idna
+        import importlib._bootstrap
+
+        module_docs = {
+            'encodings': 'codecs#module-encodings',
+            'encodings.idna': 'codecs#module-encodings.idna',
+        }
+
+        with unittest.mock.patch('pydoc_data.module_docs.module_docs', module_docs):
+            doc = pydoc.TextDoc()
+
+            basedir = os.path.dirname(encodings.__file__)
+            doc_link = doc.getdocloc(encodings, basedir=basedir)
+            self.assertIsNotNone(doc_link)
+            self.assertIn('codecs#module-encodings', doc_link)
+            self.assertNotIn('encodings.html', doc_link)
+
+            doc_link = doc.getdocloc(encodings.idna, basedir=basedir)
+            self.assertIsNotNone(doc_link)
+            self.assertIn('codecs#module-encodings.idna', doc_link)
+            self.assertNotIn('encodings.idna.html', doc_link)
+
+            doc_link = doc.getdocloc(importlib._bootstrap, basedir=basedir)
+            self.assertIsNone(doc_link)
 
     def test_getpager_with_stdin_none(self):
         previous_stdin = sys.stdin
@@ -976,6 +1003,31 @@ class PydocDocTest(unittest.TestCase):
             self.assertIsNone(synopsis)
             synopsis_cached = pydoc.synopsis(cached_path, {})
             self.assertIsNone(synopsis_cached)
+
+    @unittest.skipUnless(os_helper.TESTFN_UNDECODABLE,
+                         'requires undecodable file names')
+    def test_html_doc_undecodable_path(self):
+        # gh-69371: the path of the module is not encodable in UTF-8.
+        with os_helper.temp_cwd() as test_dir:
+            subdir = os.path.join(os.fsencode(test_dir),
+                                  os_helper.TESTFN_UNDECODABLE)
+            try:
+                os.mkdir(subdir)
+            except OSError:
+                self.skipTest('undecodable paths are not supported')
+            with open(os.path.join(subdir, b'undecodable_mod.py'), 'w') as f:
+                f.write('"""Module docstring."""\n')
+            with import_helper.DirsOnSysPath(os.fsdecode(subdir)):
+                mod = import_helper.import_fresh_module('undecodable_mod')
+                doc = pydoc.HTMLDoc().docmodule(mod)
+                with captured_stdout():
+                    pydoc.writedoc(mod)
+            # The link contains the percent-encoded path...
+            path = inspect.getabsfile(mod)
+            self.assertIn(urllib.request.pathname2url(path), doc)
+            # ...and the page can be written and served as UTF-8.
+            with open('undecodable_mod.html', encoding='utf-8') as f:
+                self.assertIn('undecodable_mod', f.read())
 
     def test_splitdoc_with_description(self):
         example_string = "I Am A Doc\n\n\nHere is my description"
@@ -1926,9 +1978,11 @@ class PydocFodderTest(unittest.TestCase):
         if not support.MISSING_C_DOCSTRINGS:
             self.assertIn(' |  get(key, default=None, /) method of builtins.dict instance', lines)
             self.assertIn(' |  dict_get = get(key, default=None, /) method of builtins.dict instance', lines)
+            self.assertIn(' |  sin(x, /)', lines)
         else:
             self.assertIn(' |  get(...) method of builtins.dict instance', lines)
             self.assertIn(' |  dict_get = get(...) method of builtins.dict instance', lines)
+            self.assertIn(' |  sin(object, /)', lines)
 
         lines = self.getsection(result, f' |  Class methods {where}:', ' |  ' + '-'*70)
         self.assertIn(' |  B_classmethod(x)', lines)
@@ -2014,6 +2068,11 @@ class PydocFodderTest(unittest.TestCase):
             self.assertIn('    __repr__(...) unbound builtins.object method', lines)
             self.assertIn('    object_repr = __repr__(...) unbound builtins.object method', lines)
 
+        # builtin functions
+        if not support.MISSING_C_DOCSTRINGS:
+            self.assertIn('    sin(x, /)', lines)
+        else:
+            self.assertIn('    sin(object, /)', lines)
 
     def test_html_doc_routines_in_module(self):
         doc = pydoc.HTMLDoc()
@@ -2053,6 +2112,12 @@ class PydocFodderTest(unittest.TestCase):
             self.assertIn(' list_count = count(self, object, /) unbound builtins.list method', lines)
             self.assertIn(' __repr__(...) unbound builtins.object method', lines)
             self.assertIn(' object_repr = __repr__(...) unbound builtins.object method', lines)
+
+        # builtin functions
+        if not support.MISSING_C_DOCSTRINGS:
+            self.assertIn(' sin(x, /)', lines)
+        else:
+            self.assertIn(' sin(object, /)', lines)
 
 
 @unittest.skipIf(
@@ -2136,9 +2201,46 @@ class PydocUrlHandlerTest(PydocBaseTest):
 
 
 class TestHelper(unittest.TestCase):
+    def mock_interactive_session(self, inputs):
+        """
+        Given a list of inputs, run an interactive help session.  Returns a string
+        of what would be shown on screen.
+        """
+        input_iter = iter(inputs)
+
+        def mock_getline(prompt):
+            output.write(prompt)
+            next_input = next(input_iter)
+            output.write(next_input + os.linesep)
+            return next_input
+
+        with captured_stdout() as output:
+            helper = pydoc.Helper(output=output)
+            with unittest.mock.patch.object(helper, "getline", mock_getline):
+                helper.interact()
+
+        # handle different line endings across platforms consistently
+        return output.getvalue().strip().splitlines(keepends=False)
+
     def test_keywords(self):
         self.assertEqual(sorted(pydoc.Helper.keywords),
-                         sorted(keyword.kwlist))
+                         sorted(keyword.kwlist + ['case', 'match']))
+
+    def test_interact_empty_line_continues(self):
+        # gh-138568: test pressing Enter without input should continue in help session
+        self.assertEqual(
+            self.mock_interactive_session(["", "    ", "quit"]),
+            ["help> ", "help>     ", "help> quit"],
+        )
+
+    def test_interact_quit_commands_exit(self):
+        quit_commands = ["quit", "q", "exit"]
+        for quit_cmd in quit_commands:
+            with self.subTest(quit_command=quit_cmd):
+                self.assertEqual(
+                    self.mock_interactive_session([quit_cmd]),
+                    [f"help> {quit_cmd}"],
+                )
 
 
 class PydocWithMetaClasses(unittest.TestCase):

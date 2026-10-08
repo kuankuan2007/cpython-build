@@ -17,13 +17,13 @@ env:
 jobs:
   build:
     name: installer for ${{ inputs.arch }}
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 60
     env:
       ARCH: ${{ inputs.arch }}
       IncludeFreethreaded: true
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
     - name: Build CPython installer

@@ -313,6 +313,7 @@ class TestPartial:
 
     def test_setstate_errors(self):
         f = self.partial(signature)
+
         self.assertRaises(TypeError, f.__setstate__, (capture, (), {}))
         self.assertRaises(TypeError, f.__setstate__, (capture, (), {}, {}, None))
         self.assertRaises(TypeError, f.__setstate__, [capture, (), {}, None])
@@ -320,6 +321,8 @@ class TestPartial:
         self.assertRaises(TypeError, f.__setstate__, (capture, None, {}, None))
         self.assertRaises(TypeError, f.__setstate__, (capture, [], {}, None))
         self.assertRaises(TypeError, f.__setstate__, (capture, (), [], None))
+        self.assertRaises(TypeError, f.__setstate__, (capture, (), {}, ()))
+        self.assertRaises(TypeError, f.__setstate__, (capture, (), {}, 'test'))
 
     def test_setstate_subclasses(self):
         f = self.partial(signature)
@@ -416,6 +419,58 @@ class TestPartial:
         self.assertIs(alias.__origin__, self.partial)
         self.assertEqual(alias.__args__, (int,))
         self.assertEqual(alias.__parameters__, ())
+
+    # GH-144475: Tests that the partial object does not change until repr finishes
+    def test_repr_safety_against_reentrant_mutation(self):
+        g_partial = None
+
+        class Function:
+            def __init__(self, name):
+                self.name = name
+
+            def __call__(self):
+                return None
+
+            def __repr__(self):
+                return f"Function({self.name})"
+
+        class EvilObject:
+            def __init__(self):
+                self.triggered = False
+
+            def __repr__(self):
+                if not self.triggered and g_partial is not None:
+                    self.triggered = True
+                    new_args_tuple = (None,)
+                    new_keywords_dict = {"keyword": None}
+                    new_tuple_state = (Function("new_function"), new_args_tuple, new_keywords_dict, None)
+                    g_partial.__setstate__(new_tuple_state)
+                    gc.collect()
+                return f"EvilObject"
+
+        trigger = EvilObject()
+        func = Function("old_function")
+
+        g_partial = functools.partial(func, None, trigger=trigger)
+        self.assertEqual(repr(g_partial),"functools.partial(Function(old_function), None, trigger=EvilObject)")
+
+        trigger.triggered = False
+        g_partial = functools.partial(func, trigger, arg=None)
+        self.assertEqual(repr(g_partial),"functools.partial(Function(old_function), EvilObject, arg=None)")
+
+
+        trigger.triggered = False
+        g_partial = functools.partial(func, trigger, None)
+        self.assertEqual(repr(g_partial),"functools.partial(Function(old_function), EvilObject, None)")
+
+        trigger.triggered = False
+        g_partial = functools.partial(func, trigger=trigger, arg=None)
+        self.assertEqual(repr(g_partial),"functools.partial(Function(old_function), trigger=EvilObject, arg=None)")
+
+        trigger.triggered = False
+        g_partial = functools.partial(func, trigger, None, None, None, None, arg=None)
+        self.assertEqual(repr(g_partial),"functools.partial(Function(old_function), EvilObject, None, None, None, None, arg=None)")
+
 
 
 @unittest.skipUnless(c_functools, 'requires the C _functools module')
@@ -3148,16 +3203,11 @@ class TestSingleDispatch(unittest.TestCase):
 
     def test_method_signatures(self):
         class A:
-            def m(self, item, arg: int) -> str:
-                return str(item)
-            @classmethod
-            def cm(cls, item, arg: int) -> str:
-                return str(item)
             @functools.singledispatchmethod
             def func(self, item, arg: int) -> str:
                 return str(item)
             @func.register
-            def _(self, item, arg: bytes) -> str:
+            def _(self, item: int, arg: bytes) -> str:
                 return str(item)
 
             @functools.singledispatchmethod
@@ -3166,7 +3216,7 @@ class TestSingleDispatch(unittest.TestCase):
                 return str(arg)
             @func.register
             @classmethod
-            def _(cls, item, arg: bytes) -> str:
+            def _(cls, item: int, arg: bytes) -> str:
                 return str(item)
 
             @functools.singledispatchmethod
@@ -3175,7 +3225,7 @@ class TestSingleDispatch(unittest.TestCase):
                 return str(arg)
             @func.register
             @staticmethod
-            def _(item, arg: bytes) -> str:
+            def _(item: int, arg: bytes) -> str:
                 return str(item)
 
         self.assertEqual(str(Signature.from_callable(A.func)),

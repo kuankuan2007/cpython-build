@@ -22,8 +22,14 @@ Features and minimum versions required to build CPython:
 
 * Support for threads.
 
-* OpenSSL 1.1.1 is the minimum version and OpenSSL 3.0.9 is the recommended
-  minimum version for the :mod:`ssl` and :mod:`hashlib` extension modules.
+* OpenSSL 1.1.1 is the minimum possible version to build the :mod:`ssl` and
+  :mod:`hashlib` extension modules against, but the series is end-of-life and
+  no longer receives public security fixes.  Use the latest patch release of a
+  currently supported LTS release series (see the `OpenSSL Roadmap
+  <https://openssl-library.org/roadmap/index.html>`__), or the package
+  provided by your operating system if available.  Other libraries that offer
+  an API compatible with OpenSSL 1.1.1 or later may work, but are not
+  officially supported.
 
 * SQLite 3.15.2 for the :mod:`sqlite3` extension module.
 
@@ -708,9 +714,11 @@ See also the :ref:`Python Development Mode <devmode>` and the
 :option:`--with-trace-refs` configure option.
 
 .. versionchanged:: 3.8
-   Release builds and debug builds are now ABI compatible: defining the
+   Release builds are now ABI compatible with debug builds: defining the
    ``Py_DEBUG`` macro no longer implies the ``Py_TRACE_REFS`` macro (see the
-   :option:`--with-trace-refs` option).
+   :option:`--with-trace-refs` option). However, debug builds still expose
+   more symbols than release builds and code built against a debug build is not
+   necessarily compatible with a release build.
 
 
 Debug options
@@ -835,9 +843,9 @@ Libraries options
    .. versionchanged:: 3.13
       Default to using the installed ``mpdecimal`` library.
 
-   .. deprecated-removed:: 3.13 3.15
+   .. deprecated-removed:: 3.13 3.16
       A copy of the ``mpdecimal`` library sources will no longer be distributed
-      with Python 3.15.
+      with Python 3.16.
 
    .. seealso:: :option:`LIBMPDEC_CFLAGS` and :option:`LIBMPDEC_LIBS`.
 

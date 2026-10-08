@@ -506,7 +506,6 @@ deque_extend_impl(dequeobject *deque, PyObject *iterable)
     iternext = *Py_TYPE(it)->tp_iternext;
     while ((item = iternext(it)) != NULL) {
         if (deque_append_lock_held(deque, item, maxlen) == -1) {
-            Py_DECREF(item);
             Py_DECREF(it);
             return NULL;
         }
@@ -1824,7 +1823,7 @@ static PyMethodDef deque_methods[] = {
     DEQUE_ROTATE_METHODDEF
     DEQUE___SIZEOF___METHODDEF
     {"__class_getitem__",       Py_GenericAlias,
-        METH_O|METH_CLASS,       PyDoc_STR("See PEP 585")},
+    METH_O|METH_CLASS,          PyDoc_STR("deques are generic over the type of their contents")},
     {NULL,              NULL}   /* sentinel */
 };
 
@@ -2203,11 +2202,11 @@ defdict_missing(defdictobject *dd, PyObject *key)
     value = _PyObject_CallNoArgs(factory);
     if (value == NULL)
         return value;
-    if (PyObject_SetItem((PyObject *)dd, key, value) < 0) {
-        Py_DECREF(value);
-        return NULL;
-    }
-    return value;
+    PyObject *result = NULL;
+    (void)PyDict_SetDefaultRef((PyObject *)dd, key, value, &result);
+    // 'result' is NULL, or a strong reference to 'value' or 'dd[key]'
+    Py_DECREF(value);
+    return result;
 }
 
 static inline PyObject*
@@ -2284,6 +2283,12 @@ defdict_reduce(defdictobject *dd, PyObject *Py_UNUSED(ignored))
     return result;
 }
 
+
+PyDoc_STRVAR(defdict_class_getitem_doc,
+"defaultdicts are generic over two types, signifying (respectively) the types \
+of the dictionary's keys and values");
+
+
 static PyMethodDef defdict_methods[] = {
     {"__missing__", (PyCFunction)defdict_missing, METH_O,
      defdict_missing_doc},
@@ -2294,7 +2299,7 @@ static PyMethodDef defdict_methods[] = {
     {"__reduce__", (PyCFunction)defdict_reduce, METH_NOARGS,
      reduce_doc},
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     defdict_class_getitem_doc},
     {NULL}
 };
 
@@ -2337,9 +2342,10 @@ defdict_repr(defdictobject *dd)
             }
             defrepr = PyUnicode_FromString("...");
         }
-        else
+        else {
             defrepr = PyObject_Repr(dd->default_factory);
-        Py_ReprLeave(dd->default_factory);
+            Py_ReprLeave(dd->default_factory);
+        }
     }
     if (defrepr == NULL) {
         Py_DECREF(baserepr);
@@ -2549,7 +2555,12 @@ _collections__count_elements_impl(PyObject *module, PyObject *mapping,
                 if (_PyDict_SetItem_KnownHash(mapping, key, one, hash) < 0)
                     goto done;
             } else {
+                /* oldval is a borrowed reference.  Keep it alive across
+                   PyNumber_Add(), which can execute arbitrary user code and
+                   mutate (or even clear) the underlying dict. */
+                Py_INCREF(oldval);
                 newval = PyNumber_Add(oldval, one);
+                Py_DECREF(oldval);
                 if (newval == NULL)
                     goto done;
                 if (_PyDict_SetItem_KnownHash(mapping, key, newval, hash) < 0)

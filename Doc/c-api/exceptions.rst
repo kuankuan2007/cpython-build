@@ -119,6 +119,21 @@ Printing and clearing
    .. versionadded:: 3.12
 
 
+.. c:function:: void PyErr_Display(PyObject *unused, PyObject *value, PyObject *tb)
+
+   Legacy variant of :c:func:`PyErr_DisplayException`.
+
+   Print the exception *value* with its traceback to :data:`sys.stderr`.
+   If *value* has no traceback set, *tb* is used as its traceback.
+   The first argument is ignored.
+
+   If :data:`sys.stderr` is ``None``, nothing is printed.
+   If :data:`sys.stderr` is not set, the exception is dumped to the
+   C ``stderr`` stream instead.
+
+   .. deprecated:: 3.12
+      Use :c:func:`PyErr_DisplayException` instead.
+
 Raising exceptions
 ==================
 
@@ -309,6 +324,14 @@ For convenience, some of these functions will always return a
    .. versionadded:: 3.4
 
 
+.. c:function:: void PyErr_RangedSyntaxLocationObject(PyObject *filename, int lineno, int col_offset, int end_lineno, int end_col_offset)
+
+   Similar to :c:func:`PyErr_SyntaxLocationObject`, but also sets the
+   *end_lineno* and *end_col_offset* information for the current exception.
+
+   .. versionadded:: 3.10
+
+
 .. c:function:: void PyErr_SyntaxLocationEx(const char *filename, int lineno, int col_offset)
 
    Like :c:func:`PyErr_SyntaxLocationObject`, but *filename* is a byte string
@@ -329,6 +352,23 @@ For convenience, some of these functions will always return a
    where *message* indicates that an internal operation (e.g. a Python/C API
    function) was invoked with an illegal argument.  It is mostly for internal
    use.
+
+
+.. c:function:: PyObject *PyErr_ProgramTextObject(PyObject *filename, int lineno)
+
+   Get the source line in *filename* at line *lineno*. *filename* should be a
+   Python :class:`str` object.
+
+   On success, this function returns a Python string object with the found line.
+   On failure, this function returns ``NULL`` without an exception set.
+
+
+.. c:function:: PyObject *PyErr_ProgramText(const char *filename, int lineno)
+
+   Similar to :c:func:`PyErr_ProgramTextObject`, but *filename* is a
+   :c:expr:`const char *`, which is decoded with the
+   :term:`filesystem encoding and error handler`, instead of a
+   Python object reference.
 
 
 Issuing warnings
@@ -387,8 +427,17 @@ an error value).
 
 .. c:function:: int PyErr_WarnFormat(PyObject *category, Py_ssize_t stack_level, const char *format, ...)
 
-   Function similar to :c:func:`PyErr_WarnEx`, but use
+   Function similar to :c:func:`PyErr_WarnEx`, but uses
    :c:func:`PyUnicode_FromFormat` to format the warning message.  *format* is
+   an ASCII-encoded string.
+
+   .. versionadded:: 3.2
+
+
+.. c:function:: int PyErr_WarnExplicitFormat(PyObject *category, const char *filename, int lineno, const char *module, PyObject *registry, const char *format, ...)
+
+   Similar to :c:func:`PyErr_WarnExplicit`, but uses
+   :c:func:`PyUnicode_FromFormat` to format the warning message. *format* is
    an ASCII-encoded string.
 
    .. versionadded:: 3.2
@@ -465,11 +514,12 @@ Querying the error indicator
 .. c:function:: void PyErr_SetRaisedException(PyObject *exc)
 
    Set *exc* as the exception currently being raised,
-   clearing the existing exception if one is set.
+   clearing the existing exception if one is set.  If *exc* is ``NULL``,
+   just clear the existing exception.
 
-   .. warning::
+   *exc* must be a valid exception or ``NULL``.
 
-      This call steals a reference to *exc*, which must be a valid exception.
+   This call ":term:`steals <steal>`" a reference to *exc*.
 
    .. versionadded:: 3.12
 
@@ -607,7 +657,8 @@ Querying the error indicator
 
    Set the exception info, as known from ``sys.exc_info()``.  This refers
    to an exception that was *already caught*, not to an exception that was
-   freshly raised.  This function steals the references of the arguments.
+   freshly raised.  This function ":term:`steals <steal>`" the references
+   of the arguments.
    To clear the exception state, pass ``NULL`` for all three arguments.
    This function is kept for backwards compatibility. Prefer using
    :c:func:`PyErr_SetHandledException`.
@@ -624,8 +675,8 @@ Querying the error indicator
    .. versionchanged:: 3.11
       The ``type`` and ``traceback`` arguments are no longer used and
       can be NULL. The interpreter now derives them from the exception
-      instance (the ``value`` argument). The function still steals
-      references of all three arguments.
+      instance (the ``value`` argument). The function still
+      ":term:`steals <steal>`" references of all three arguments.
 
 
 Signal Handling
@@ -639,28 +690,40 @@ Signal Handling
       single: SIGINT (C macro)
       single: KeyboardInterrupt (built-in exception)
 
-   This function interacts with Python's signal handling.
+   Handle external interruptions, such as signals or activating a debugger,
+   whose processing has been delayed until it is safe
+   to run Python code and/or raise exceptions.
 
-   If the function is called from the main thread and under the main Python
-   interpreter, it checks whether a signal has been sent to the processes
-   and if so, invokes the corresponding signal handler.  If the :mod:`signal`
-   module is supported, this can invoke a signal handler written in Python.
+   For example, pressing :kbd:`Ctrl-C` causes a terminal to send the
+   :py:data:`signal.SIGINT` signal.
+   This function executes the corresponding Python signal handler, which,
+   by default, raises the :exc:`KeyboardInterrupt` exception.
 
-   The function attempts to handle all pending signals, and then returns ``0``.
-   However, if a Python signal handler raises an exception, the error
-   indicator is set and the function returns ``-1`` immediately (such that
-   other pending signals may not have been handled yet: they will be on the
-   next :c:func:`PyErr_CheckSignals()` invocation).
+   :c:func:`!PyErr_CheckSignals` should be called by long-running C code
+   frequently enough so that the response appears immediate to humans.
 
-   If the function is called from a non-main thread, or under a non-main
-   Python interpreter, it does nothing and returns ``0``.
+   Handlers invoked by this function currently include:
 
-   This function can be called by long-running C code that wants to
-   be interruptible by user requests (such as by pressing Ctrl-C).
+   - Signal handlers, including Python functions registered using
+     the :mod:`signal` module.
 
-   .. note::
-      The default Python signal handler for :c:macro:`!SIGINT` raises the
-      :exc:`KeyboardInterrupt` exception.
+     Signal handlers are only run in the main thread of the main interpreter.
+
+     (This is where the function got the name: originally, signals
+     were the only way to interrupt the interpreter.)
+
+   - Running the garbage collector, if necessary.
+
+   If any handler raises an exception, immediately return ``-1`` with that
+   exception set.
+   Any remaining interruptions are left to be processed on the next
+   :c:func:`PyErr_CheckSignals()` invocation, if appropriate.
+
+   If all handlers finish successfully, or there are no handlers to run,
+   return ``0``.
+
+   .. versionchanged:: 3.12
+      This function may now invoke the garbage collector.
 
 
 .. c:function:: void PyErr_SetInterrupt()
@@ -762,6 +825,17 @@ Exception Classes
 Exception Objects
 =================
 
+.. c:function:: int PyExceptionInstance_Check(PyObject *op)
+
+   Return true if *op* is an instance of :class:`BaseException`, false
+   otherwise. This function always succeeds.
+
+
+.. c:macro:: PyExceptionInstance_Class(op)
+
+   Equivalent to :c:func:`Py_TYPE(op) <Py_TYPE>`.
+
+
 .. c:function:: PyObject* PyException_GetTraceback(PyObject *ex)
 
    Return the traceback associated with the exception as a new reference, as
@@ -788,7 +862,7 @@ Exception Objects
 
    Set the context associated with the exception to *ctx*.  Use ``NULL`` to clear
    it.  There is no type check to make sure that *ctx* is an exception instance.
-   This steals a reference to *ctx*.
+   This ":term:`steals <steal>`" a reference to *ctx*.
 
 
 .. c:function:: PyObject* PyException_GetCause(PyObject *ex)
@@ -803,7 +877,8 @@ Exception Objects
 
    Set the cause associated with the exception to *cause*.  Use ``NULL`` to clear
    it.  There is no type check to make sure that *cause* is either an exception
-   instance or ``None``.  This steals a reference to *cause*.
+   instance or ``None``.
+   This ":term:`steals <steal>`" a reference to *cause*.
 
    The :attr:`~BaseException.__suppress_context__` attribute is implicitly set
    to ``True`` by this function.
@@ -942,7 +1017,7 @@ Properly implementing :c:member:`~PyTypeObject.tp_repr` for container types requ
 special recursion handling.  In addition to protecting the stack,
 :c:member:`~PyTypeObject.tp_repr` also needs to track objects to prevent cycles.  The
 following two functions facilitate this functionality.  Effectively,
-these are the C equivalent to :func:`reprlib.recursive_repr`.
+these are the C equivalent to :deco:`reprlib.recursive_repr`.
 
 .. c:function:: int Py_ReprEnter(PyObject *object)
 
@@ -967,6 +1042,27 @@ these are the C equivalent to :func:`reprlib.recursive_repr`.
    Ends a :c:func:`Py_ReprEnter`.  Must be called once for each
    invocation of :c:func:`Py_ReprEnter` that returns zero.
 
+.. c:function:: int Py_GetRecursionLimit(void)
+
+   Get the recursion limit for the current interpreter. It can be set with
+   :c:func:`Py_SetRecursionLimit`. The recursion limit prevents the
+   Python interpreter stack from growing infinitely.
+
+   This function cannot fail, and the caller must hold the
+   :term:`GIL`.
+
+   .. seealso::
+      :py:func:`sys.getrecursionlimit`
+
+.. c:function:: void Py_SetRecursionLimit(int new_limit)
+
+   Set the recursion limit for the current interpreter.
+
+   This function cannot fail, and the caller must hold the
+   :term:`GIL`.
+
+   .. seealso::
+      :py:func:`sys.setrecursionlimit`
 
 .. _standardexceptions:
 
@@ -1195,3 +1291,37 @@ Warning types
 
 .. versionadded:: 3.10
    :c:data:`PyExc_EncodingWarning`.
+
+
+Tracebacks
+==========
+
+.. c:var:: PyTypeObject PyTraceBack_Type
+
+   Type object for traceback objects. This is available as
+   :class:`types.TracebackType` in the Python layer.
+
+
+.. c:function:: int PyTraceBack_Check(PyObject *op)
+
+   Return true if *op* is a traceback object, false otherwise. This function
+   does not account for subtypes.
+
+
+.. c:function:: int PyTraceBack_Here(PyFrameObject *f)
+
+   Replace the :attr:`~BaseException.__traceback__` attribute on the current
+   exception with a new traceback prepending *f* to the existing chain.
+
+   Calling this function without an exception set is undefined behavior.
+
+   This function returns ``0`` on success, and returns ``-1`` with an
+   exception set on failure.
+
+
+.. c:function:: int PyTraceBack_Print(PyObject *tb, PyObject *f)
+
+   Write the traceback *tb* into the file *f*.
+
+   This function returns ``0`` on success, and returns ``-1`` with an
+   exception set on failure.

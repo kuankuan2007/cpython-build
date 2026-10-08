@@ -7,6 +7,20 @@
 
 /* ############## ERRORS ############## */
 
+/* Convert a 1-based column in bytes into a 1-based column in characters.
+   The line is UTF-8 encoded, so it is enough to skip continuation bytes. */
+static int
+byte_col_to_char_col(const char *line, int byte_col)
+{
+    int char_col = 1;
+    for (int i = 0; i < byte_col - 1; i++) {
+        if ((line[i] & 0xC0) != 0x80) {
+            char_col++;
+        }
+    }
+    return char_col;
+}
+
 static int
 _syntaxerror_range(struct tok_state *tok, const char *format,
                    int col_offset, int end_col_offset,
@@ -33,8 +47,14 @@ _syntaxerror_range(struct tok_state *tok, const char *format,
     if (col_offset == -1) {
         col_offset = (int)PyUnicode_GET_LENGTH(errtext);
     }
+    else if (col_offset > 0) {
+        col_offset = byte_col_to_char_col(tok->line_start, col_offset);
+    }
     if (end_col_offset == -1) {
         end_col_offset = col_offset;
+    }
+    else if (end_col_offset > 0) {
+        end_col_offset = byte_col_to_char_col(tok->line_start, end_col_offset);
     }
 
     Py_ssize_t line_len = strcspn(tok->line_start, "\n");
@@ -183,6 +203,7 @@ _PyTokenizer_new_string(const char *s, Py_ssize_t len, struct tok_state *tok)
     char* result = (char *)PyMem_Malloc(len + 1);
     if (!result) {
         tok->done = E_NOMEM;
+        PyErr_NoMemory();
         return NULL;
     }
     memcpy(result, s, len);
@@ -211,6 +232,7 @@ _PyTokenizer_translate_newlines(const char *s, int exec_input, int preserve_crlf
     buf = PyMem_Malloc(needed_length);
     if (buf == NULL) {
         tok->done = E_NOMEM;
+        PyErr_NoMemory();
         return NULL;
     }
     for (current = buf; *s; s++, current++) {
@@ -481,9 +503,11 @@ valid_utf8(const unsigned char* s)
         return 0;
     }
     length = expected + 1;
-    for (; expected; expected--)
-        if (s[expected] < 0x80 || s[expected] >= 0xC0)
+    for (int i = 1; i <= expected; i++) {
+        if (s[i] < 0x80 || s[i] >= 0xC0) {
             return 0;
+        }
+    }
     return length;
 }
 

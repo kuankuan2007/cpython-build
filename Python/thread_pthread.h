@@ -16,6 +16,7 @@
 #undef destructor
 #endif
 #include <signal.h>
+#include <unistd.h>             /* pause(), also getthrid() on OpenBSD */
 
 #if defined(__linux__)
 #   include <sys/syscall.h>     /* syscall(SYS_gettid) */
@@ -23,8 +24,6 @@
 #   include <pthread_np.h>      /* pthread_getthreadid_np() */
 #elif defined(__FreeBSD_kernel__)
 #   include <sys/syscall.h>     /* syscall(SYS_thr_self) */
-#elif defined(__OpenBSD__)
-#   include <unistd.h>          /* getthrid() */
 #elif defined(_AIX)
 #   include <sys/thread.h>      /* thread_self() */
 #elif defined(__NetBSD__)
@@ -408,8 +407,8 @@ PyThread_get_thread_native_id(void)
     lwpid_t native_id;
     native_id = _lwp_self();
 #elif defined(__DragonFly__)
-    lwpid_t native_id;
-    native_id = lwp_gettid();
+    // lwp_gettid() is only unique within a process, so combine it with the pid.
+    unsigned long native_id = (unsigned long)getpid() << 32 | lwp_gettid();
 #endif
     return (unsigned long) native_id;
 }
@@ -429,6 +428,18 @@ PyThread_exit_thread(void)
 #else
     pthread_exit(0);
 #endif
+}
+
+void _Py_NO_RETURN
+PyThread_hang_thread(void)
+{
+    while (1) {
+#if defined(__wasi__)
+        sleep(9999999);  // WASI doesn't have pause() ?!
+#else
+        pause();
+#endif
+    }
 }
 
 #ifdef USE_SEMAPHORES

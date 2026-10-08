@@ -83,6 +83,13 @@ The :mod:`csv` module defines the following functions:
       Spam, Spam, Spam, Spam, Spam, Baked Beans
       Spam, Lovely Spam, Wonderful Spam
 
+   where :file:`eggs.csv` contains:
+
+   .. code-block:: text
+
+      Spam Spam Spam Spam Spam |Baked Beans|
+      Spam |Lovely Spam| |Wonderful Spam|
+
 
 .. function:: writer(csvfile, /, dialect='excel', **fmtparams)
 
@@ -112,8 +119,15 @@ The :mod:`csv` module defines the following functions:
           spamwriter.writerow(['Spam'] * 5 + ['Baked Beans'])
           spamwriter.writerow(['Spam', 'Lovely Spam', 'Wonderful Spam'])
 
+   which writes :file:`eggs.csv` containing:
 
-.. function:: register_dialect(name[, dialect[, **fmtparams]])
+   .. code-block:: text
+
+      Spam Spam Spam Spam Spam |Baked Beans|
+      Spam |Lovely Spam| |Wonderful Spam|
+
+
+.. function:: register_dialect(name, /, dialect='excel', **fmtparams)
 
    Associate *dialect* with *name*.  *name* must be a string. The
    dialect can be specified either by passing a sub-class of :class:`Dialect`, or
@@ -139,7 +153,8 @@ The :mod:`csv` module defines the following functions:
    Return the names of all registered dialects.
 
 
-.. function:: field_size_limit([new_limit])
+.. function:: field_size_limit()
+              field_size_limit(new_limit)
 
    Returns the current maximum field size allowed by the parser. If *new_limit* is
    given, this becomes the new limit.
@@ -192,6 +207,14 @@ The :mod:`csv` module defines the following classes:
        >>> print(row)
        {'first_name': 'John', 'last_name': 'Cleese'}
 
+   where :file:`names.csv` contains:
+
+   .. code-block:: text
+
+      first_name,last_name
+      Eric,Idle
+      John,Cleese
+
 
 .. class:: DictWriter(f, fieldnames, restval='', extrasaction='raise', \
                       dialect='excel', *args, **kwds)
@@ -228,6 +251,15 @@ The :mod:`csv` module defines the following classes:
            writer.writerow({'first_name': 'Baked', 'last_name': 'Beans'})
            writer.writerow({'first_name': 'Lovely', 'last_name': 'Spam'})
            writer.writerow({'first_name': 'Wonderful', 'last_name': 'Spam'})
+
+   which writes :file:`names.csv` containing:
+
+   .. code-block:: text
+
+      first_name,last_name
+      Baked,Beans
+      Lovely,Spam
+      Wonderful,Spam
 
 
 .. class:: Dialect
@@ -282,6 +314,11 @@ The :mod:`csv` module defines the following classes:
       is given, it is interpreted as a string containing possible valid
       delimiter characters.
 
+      If several delimiters fit the sample equally well ---
+      for example if both ``','`` and ``';'`` split every row consistently ---
+      the delimiters listed in the :attr:`~Sniffer.preferred` attribute
+      are preferred, in that order,
+      no matter how many times each of them occurs.
 
    .. method:: has_header(sample)
 
@@ -294,13 +331,22 @@ The :mod:`csv` module defines the following classes:
       - the second through n-th rows contain strings where at least one value's
         length differs from that of the putative header of that column.
 
-      Twenty rows after the first row are sampled; if more than half of columns +
-      rows meet the criteria, :const:`True` is returned.
+      Twenty-one rows after the header are sampled; if more than half of the
+      columns + rows meet the criteria, :const:`True` is returned.
 
    .. note::
 
       This method is a rough heuristic and may produce both false positives and
       negatives.
+
+   The :class:`Sniffer` class has the following attribute:
+
+   .. attribute:: preferred
+
+      The list of the delimiters preferred for breaking ties,
+      in the order of preference.
+      It can be modified.
+      Its initial value is ``[',', '\t', ';', ' ', ':']``.
 
 An example for :class:`Sniffer` use::
 
@@ -325,6 +371,8 @@ The :mod:`csv` module defines the following constants:
    Instructs :class:`writer` objects to only quote those fields which contain
    special characters such as *delimiter*, *quotechar*, ``'\r'``, ``'\n'``
    or any of the characters in *lineterminator*.
+   If *doublequote* is :const:`False` and *escapechar* is set,
+   the *quotechar* is escaped instead of causing the field to be quoted.
 
 
 .. data:: QUOTE_NONNUMERIC
@@ -429,6 +477,10 @@ Dialects support the following attributes:
    On reading, the *escapechar* removes any special meaning from
    the following character. It defaults to :const:`None`, which disables escaping.
 
+   .. versionchanged:: 3.10
+      Previously the *escapechar* itself was not escaped,
+      which lost it on reading.
+
    .. versionchanged:: 3.11
       An empty *escapechar* is not allowed.
 
@@ -467,7 +519,8 @@ Dialects support the following attributes:
 .. attribute:: Dialect.skipinitialspace
 
    When :const:`True`, spaces immediately following the *delimiter* are ignored.
-   The default is :const:`False`.
+   The default is :const:`False`.  When combining ``delimiter=' '`` with
+   ``skipinitialspace=True``, unquoted empty fields are not allowed.
 
 
 .. attribute:: Dialect.strict
@@ -526,7 +579,7 @@ out surrounded by parens. This may cause some problems for other programs which
 read CSV files (assuming they support complex numbers at all).
 
 
-.. method:: csvwriter.writerow(row)
+.. method:: csvwriter.writerow(row, /)
 
    Write the *row* parameter to the writer's file object, formatted according
    to the current :class:`Dialect`. Return the return value of the call to the
@@ -535,7 +588,7 @@ read CSV files (assuming they support complex numbers at all).
    .. versionchanged:: 3.5
       Added support of arbitrary iterables.
 
-.. method:: csvwriter.writerows(rows)
+.. method:: csvwriter.writerows(rows, /)
 
    Write all elements in *rows* (an iterable of *row* objects as described
    above) to the writer's file object, formatted according to the current
@@ -636,7 +689,7 @@ done::
 .. rubric:: Footnotes
 
 .. [1] If ``newline=''`` is not specified, newlines embedded inside quoted fields
-   will not be interpreted correctly, and on platforms that use ``\r\n`` linendings
+   will not be interpreted correctly, and on platforms that use ``\r\n`` line endings
    on write an extra ``\r`` will be added.  It should always be safe to specify
    ``newline=''``, since the csv module does its own
    (:term:`universal <universal newlines>`) newline handling.

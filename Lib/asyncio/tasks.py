@@ -118,11 +118,20 @@ class Task(futures._PyFuture):  # Inherit Python Task implementation
         self._coro = coro
         if context is None:
             self._context = contextvars.copy_context()
+        elif not isinstance(context, contextvars.Context):
+            # gh-157301: the passed value must be a contextvars.Context
+            self._log_destroy_pending = False
+            raise TypeError('a contextvars.Context was expected, '
+                            f'got {type(context).__name__}')
         else:
             self._context = context
 
         if eager_start and self._loop.is_running():
-            self.__eager_start()
+            try:
+                self.__eager_start()
+            except:
+                self._log_destroy_pending = False
+                raise
         else:
             self._loop.call_soon(self.__step, context=self._context)
             _register_task(self)
@@ -459,15 +468,13 @@ def _release_waiter(waiter, *args):
 async def wait_for(fut, timeout):
     """Wait for the single Future or coroutine to complete, with timeout.
 
-    Coroutine will be wrapped in Task.
-
     Returns result of the Future or coroutine.  When a timeout occurs,
-    it cancels the task and raises TimeoutError.  To avoid the task
-    cancellation, wrap it in shield().
+    it cancels fut and raises TimeoutError.  To prevent fut from being
+    cancelled, wrap it in shield().
 
-    If the wait is cancelled, the task is also cancelled.
+    If the wait is cancelled, fut is also cancelled.
 
-    If the task suppresses the cancellation and returns a value instead,
+    If fut suppresses the cancellation and returns a value instead,
     that value is returned.
 
     This function is a coroutine.
@@ -640,10 +647,11 @@ def as_completed(fs, *, timeout=None):
     Run the supplied awaitables concurrently. The returned object can be
     iterated to obtain the results of the awaitables as they finish.
 
-    The object returned can be iterated as an asynchronous iterator or a plain
-    iterator. When asynchronous iteration is used, the originally-supplied
-    awaitables are yielded if they are tasks or futures. This makes it easy to
-    correlate previously-scheduled tasks with their results:
+    The object returned can be iterated as an asynchronous iterator or
+    a plain iterator.  When asynchronous iteration is used, the
+    originally-supplied awaitables are yielded if they are tasks or
+    futures.  This makes it easy to correlate previously-scheduled tasks
+    with their results:
 
         ipv4_connect = create_task(open_connection("127.0.0.1", 80))
         ipv6_connect = create_task(open_connection("::1", 80))
@@ -659,26 +667,27 @@ def as_completed(fs, *, timeout=None):
             else:
                 print("IPv4 connection established.")
 
-    During asynchronous iteration, implicitly-created tasks will be yielded for
-    supplied awaitables that aren't tasks or futures.
+    During asynchronous iteration, implicitly-created tasks will be
+    yielded for supplied awaitables that aren't tasks or futures.
 
-    When used as a plain iterator, each iteration yields a new coroutine that
-    returns the result or raises the exception of the next completed awaitable.
-    This pattern is compatible with Python versions older than 3.13:
+    When used as a plain iterator, each iteration yields a new coroutine
+    that returns the result or raises the exception of the next completed
+    awaitable.  This pattern is compatible with Python versions older than
+    3.13:
 
         ipv4_connect = create_task(open_connection("127.0.0.1", 80))
         ipv6_connect = create_task(open_connection("::1", 80))
         tasks = [ipv4_connect, ipv6_connect]
 
         for next_connect in as_completed(tasks):
-            # next_connect is not one of the original task objects. It must be
-            # awaited to obtain the result value or raise the exception of the
-            # awaitable that finishes next.
+            # next_connect is not one of the original task objects. It must
+            # be awaited to obtain the result value or raise the exception
+            # of the awaitable that finishes next.
             reader, writer = await next_connect
 
-    A TimeoutError is raised if the timeout occurs before all awaitables are
-    done. This is raised by the async for loop during asynchronous iteration or
-    by the coroutines yielded during plain iteration.
+    A TimeoutError is raised if the timeout occurs before all awaitables
+    are done.  This is raised by the async for loop during asynchronous
+    iteration or by the coroutines yielded during plain iteration.
     """
     if inspect.isawaitable(fs):
         raise TypeError(
@@ -1007,21 +1016,22 @@ def run_coroutine_threadsafe(coro, loop):
 def create_eager_task_factory(custom_task_constructor):
     """Create a function suitable for use as a task factory on an event-loop.
 
-        Example usage:
+    Example usage:
 
-            loop.set_task_factory(
-                asyncio.create_eager_task_factory(my_task_constructor))
+        loop.set_task_factory(
+            asyncio.create_eager_task_factory(my_task_constructor))
 
-        Now, tasks created will be started immediately (rather than being first
-        scheduled to an event loop). The constructor argument can be any callable
-        that returns a Task-compatible object and has a signature compatible
-        with `Task.__init__`; it must have the `eager_start` keyword argument.
+    Now, tasks created will be started immediately (rather than being first
+    scheduled to an event loop).  The constructor argument can be any
+    callable that returns a Task-compatible object and has a signature
+    compatible with `Task.__init__`; it must have the `eager_start`
+    keyword argument.
 
-        Most applications will use `Task` for `custom_task_constructor` and in
-        this case there's no need to call `create_eager_task_factory()`
-        directly. Instead the  global `eager_task_factory` instance can be
-        used. E.g. `loop.set_task_factory(asyncio.eager_task_factory)`.
-        """
+    Most applications will use `Task` for `custom_task_constructor` and in
+    this case there's no need to call `create_eager_task_factory()`
+    directly. Instead the  global `eager_task_factory` instance can be
+    used. E.g. `loop.set_task_factory(asyncio.eager_task_factory)`.
+    """
 
     def factory(loop, coro, *, name=None, context=None):
         return custom_task_constructor(

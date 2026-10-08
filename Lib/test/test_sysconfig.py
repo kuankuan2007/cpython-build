@@ -351,6 +351,13 @@ class TestSysConfig(unittest.TestCase):
 
             self.assertEqual(get_platform(), 'macosx-10.4-%s' % arch)
 
+        for macver in range(11, 16):
+            _osx_support._remove_original_values(get_config_vars())
+            get_config_vars()['CFLAGS'] = ('-fno-strict-overflow -Wsign-compare -Wunreachable-code'
+                                        '-arch arm64 -fno-common -dynamic -DNDEBUG -g -O3 -Wall')
+            get_config_vars()['MACOSX_DEPLOYMENT_TARGET'] = f"{macver}.0"
+            self.assertEqual(get_platform(), 'macosx-%d.0-arm64' % macver)
+
         # linux debian sarge
         os.name = 'posix'
         sys.version = ('2.3.5 (#1, Jul  4 2007, 17:28:59) '
@@ -366,10 +373,12 @@ class TestSysConfig(unittest.TestCase):
         sys.platform = 'android'
         get_config_vars()['ANDROID_API_LEVEL'] = 9
         for machine, abi in {
-            'x86_64': 'x86_64',
-            'i686': 'x86',
             'aarch64': 'arm64_v8a',
+            'arm': 'armeabi_v7a',
             'armv7l': 'armeabi_v7a',
+            'armv8l': 'armeabi_v7a',
+            'i686': 'x86',
+            'x86_64': 'x86_64',
         }.items():
             with self.subTest(machine):
                 self._set_uname(('Linux', 'localhost', '3.18.91+',
@@ -578,10 +587,12 @@ class TestSysConfig(unittest.TestCase):
         machine = platform.machine()
         suffix = sysconfig.get_config_var('EXT_SUFFIX')
         expected_triplet = {
-            "x86_64": "x86_64-linux-android",
-            "i686": "i686-linux-android",
             "aarch64": "aarch64-linux-android",
+            "arm": "arm-linux-androideabi",
             "armv7l": "arm-linux-androideabi",
+            "armv8l": "arm-linux-androideabi",
+            "i686": "i686-linux-android",
+            "x86_64": "x86_64-linux-android",
         }[machine]
         self.assertTrue(suffix.endswith(f"-{expected_triplet}.so"),
                         f"{machine=}, {suffix=}")

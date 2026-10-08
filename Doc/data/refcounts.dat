@@ -1148,6 +1148,9 @@ PyInterpreterState_Clear:PyInterpreterState*:interp::
 PyInterpreterState_Delete:void:::
 PyInterpreterState_Delete:PyInterpreterState*:interp::
 
+PyInterpreterState_GetDict:PyObject*::0:
+PyInterpreterState_GetDict:PyInterpreterState*:interp::
+
 PyInterpreterState_GetID:int64_t:::
 PyInterpreterState_GetID:PyInterpreterState*:interp::
 
@@ -2394,6 +2397,9 @@ PyType_GetFlags:PyTypeObject*:type:0:
 
 PyType_GetName:PyObject*::+1:
 PyType_GetName:PyTypeObject*:type:0:
+
+PyType_GetModule:PyObject*::0:
+PyType_GetModule:PyTypeObject*:type:0:
 
 PyType_GetModuleByDef:PyObject*::0:
 PyType_GetModuleByDef:PyTypeObject*:type:0:

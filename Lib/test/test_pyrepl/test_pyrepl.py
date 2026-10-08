@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from unittest import TestCase, skipUnless, skipIf
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from test.support import force_not_colorized, make_clean_env, Py_DEBUG
 from test.support import SHORT_TIMEOUT, STDLIB_DIR
 from test.support.import_helper import import_module
@@ -33,6 +33,10 @@ try:
     import pty
 except ImportError:
     pty = None
+try:
+    import readline as readline_module
+except ImportError:
+    readline_module = None
 
 
 class ReplTestCase(TestCase):
@@ -1069,6 +1073,9 @@ class TestPasteEvent(TestCase):
 class TestDumbTerminal(ReplTestCase):
     def test_dumb_terminal_exits_cleanly(self):
         env = os.environ.copy()
+        # Ignore PYTHONSTARTUP to not pollute the output
+        # with an unrelated traceback. See GH-137568.
+        env.pop('PYTHONSTARTUP', None)
         env.update({"TERM": "dumb"})
         output, exit_code = self.run_repl("exit()\n", env=env)
         self.assertEqual(exit_code, 0)
@@ -1404,3 +1411,224 @@ class TestMain(ReplTestCase):
         output, _ = self.run_repl("1\n1+2\nexit()\n", cmdline_args=['-Xshowrefcount'], env=env)
         matches = re.findall(r'\[-?\d+ refs, \d+ blocks\]', output)
         self.assertEqual(len(matches), 3)
+
+
+    @force_not_colorized
+    def test_no_newline(self):
+        env = os.environ.copy()
+        env.pop("PYTHON_BASIC_REPL", "")
+        env["PYTHON_BASIC_REPL"] = "1"
+        # Ensure user's .inputrc doesn't interfere with basic REPL output
+        env["INPUTRC"] = "/dev/null"
+
+        commands = "print('Something pretty long', end='')\nexit()\n"
+        expected_output_sequence = "Something pretty long>>> exit()"
+
+        # gh-143394: The basic REPL needs the readline module to turn off
+        # ECHO terminal attribute.
+        if readline_module is not None:
+            basic_output, basic_exit_code = self.run_repl(commands, env=env)
+            self.assertEqual(basic_exit_code, 0)
+            self.assertIn(expected_output_sequence, basic_output)
+
+        output, exit_code = self.run_repl(commands)
+        self.assertEqual(exit_code, 0)
+
+        # Build patterns for escape sequences that don't affect cursor position
+        # or visual output. Use terminfo to get platform-specific sequences,
+        # falling back to hard-coded patterns for capabilities not in terminfo.
+        try:
+            from _pyrepl import curses
+        except ImportError:
+            self.skipTest("curses required for capability discovery")
+
+        curses.setupterm(os.environ.get("TERM", ""), 1)
+        safe_patterns = []
+
+        # smkx/rmkx - application cursor keys and keypad mode
+        smkx = curses.tigetstr("smkx")
+        rmkx = curses.tigetstr("rmkx")
+        if smkx:
+            safe_patterns.append(re.escape(smkx.decode("ascii")))
+        if rmkx:
+            safe_patterns.append(re.escape(rmkx.decode("ascii")))
+        if not smkx and not rmkx:
+            safe_patterns.append(r'\x1b\[\?1[hl]')  # application cursor keys
+            safe_patterns.append(r'\x1b[=>]')  # application keypad mode
+
+        # ich1 - insert character (only safe form that inserts exactly 1 char)
+        ich1 = curses.tigetstr("ich1")
+        if ich1:
+            safe_patterns.append(re.escape(ich1.decode("ascii")) + r'(?=[ -~])')
+        else:
+            safe_patterns.append(r'\x1b\[(?:1)?@(?=[ -~])')
+
+        # civis/cnorm - cursor visibility (may include cursor blinking control)
+        civis = curses.tigetstr("civis")
+        cnorm = curses.tigetstr("cnorm")
+        if civis:
+            safe_patterns.append(re.escape(civis.decode("ascii")))
+        if cnorm:
+            safe_patterns.append(re.escape(cnorm.decode("ascii")))
+        if not civis and not cnorm:
+            safe_patterns.append(r'\x1b\[\?25[hl]')  # cursor visibility
+            safe_patterns.append(r'\x1b\[\?12[hl]')  # cursor blinking
+
+        # rmam / smam - automatic margins
+        rmam = curses.tigetstr("rmam")
+        smam = curses.tigetstr("smam")
+        if rmam:
+            safe_patterns.append(re.escape(rmam.decode("ascii")))
+        if smam:
+            safe_patterns.append(re.escape(smam.decode("ascii")))
+        if not rmam and not smam:
+            safe_patterns.append(r'\x1b\[\?7l') # turn off automatic margins
+            safe_patterns.append(r'\x1b\[\?7h') # turn on automatic margins
+
+        # Modern extensions not in standard terminfo - always use patterns
+        safe_patterns.append(r'\x1b\[\?2004[hl]')  # bracketed paste mode
+        safe_patterns.append(r'\x1b\[\?12[hl]')  # cursor blinking (may be separate)
+        safe_patterns.append(r'\x1b\[\?[01]c')  # device attributes
+
+        safe_escapes = re.compile('|'.join(safe_patterns))
+        cleaned_output = safe_escapes.sub('', output)
+        self.assertIn(expected_output_sequence, cleaned_output)
+
+
+@skipUnless(sys.platform == "darwin", "macOS only")
+class TestMainAppleTerminal(TestMain):
+    """Test the REPL with Apple Terminal's TERM_PROGRAM set."""
+
+    def run_repl(self, repl_input, env=None, **kwargs):
+        if env is None:
+            env = os.environ.copy()
+        env["TERM_PROGRAM"] = "Apple_Terminal"
+        return super().run_repl(repl_input, env=env, **kwargs)
+
+
+class TestPyReplCtrlD(TestCase):
+    """Test Ctrl+D behavior in _pyrepl to match old pre-3.13 REPL behavior.
+
+    Ctrl+D should:
+    - Exit on empty buffer (raises EOFError)
+    - Delete character when cursor is in middle of line
+    - Perform no operation when cursor is at end of line without newline
+    - Exit multiline mode when cursor is at end with trailing newline
+    - Run code up to that point when pressed on blank line with preceding lines
+    """
+    def prepare_reader(self, events):
+        console = FakeConsole(events)
+        config = ReadlineConfig(readline_completer=None)
+        reader = ReadlineAlikeReader(console=console, config=config)
+        return reader
+
+    def test_ctrl_d_empty_line(self):
+        """Test that pressing Ctrl+D on empty line exits the program"""
+        events = [
+            Event(evt="key", data="\x04", raw=bytearray(b"\x04")),  # Ctrl+D
+        ]
+        reader = self.prepare_reader(events)
+        with self.assertRaises(EOFError):
+            multiline_input(reader)
+
+    def test_ctrl_d_multiline_with_new_line(self):
+        """Test that pressing Ctrl+D in multiline mode with trailing newline exits multiline mode"""
+        events = itertools.chain(
+            code_to_events("def f():\n    pass\n"),  # Enter multiline mode with trailing newline
+            [
+                Event(evt="key", data="\x04", raw=bytearray(b"\x04")),  # Ctrl+D
+            ],
+        )
+        reader, _ = handle_all_events(events)
+        self.assertTrue(reader.finished)
+        self.assertEqual("def f():\n    pass\n", "".join(reader.buffer))
+
+    def test_ctrl_d_multiline_middle_of_line(self):
+        """Test that pressing Ctrl+D in multiline mode with cursor in middle deletes character"""
+        events = itertools.chain(
+            code_to_events("def f():\n    hello world"),  # Enter multiline mode
+            [
+                Event(evt="key", data="left", raw=bytearray(b"\x1bOD"))
+            ] * 5,  # move cursor to 'w' in "world"
+            [
+                Event(evt="key", data="\x04", raw=bytearray(b"\x04"))
+            ], # Ctrl+D should delete 'w'
+        )
+        reader, _ = handle_all_events(events)
+        self.assertFalse(reader.finished)
+        self.assertEqual("def f():\n    hello orld", "".join(reader.buffer))
+
+    def test_ctrl_d_multiline_end_of_line_no_newline(self):
+        """Test that pressing Ctrl+D at end of line without newline performs no operation"""
+        events = itertools.chain(
+            code_to_events("def f():\n    hello"),  # Enter multiline mode, no trailing newline
+            [
+                Event(evt="key", data="\x04", raw=bytearray(b"\x04"))
+            ],  # Ctrl+D should be no-op
+        )
+        reader, _ = handle_all_events(events)
+        self.assertFalse(reader.finished)
+        self.assertEqual("def f():\n    hello", "".join(reader.buffer))
+
+    def test_ctrl_d_single_line_middle_of_line(self):
+        """Test that pressing Ctrl+D in single line mode deletes current character"""
+        events = itertools.chain(
+            code_to_events("hello"),
+            [Event(evt="key", data="left", raw=bytearray(b"\x1bOD"))],  # move left
+            [Event(evt="key", data="\x04", raw=bytearray(b"\x04"))],    # Ctrl+D
+        )
+        reader, _ = handle_all_events(events)
+        self.assertEqual("hell", "".join(reader.buffer))
+
+    def test_ctrl_d_single_line_end_no_newline(self):
+        """Test that pressing Ctrl+D at end of single line without newline does nothing"""
+        events = itertools.chain(
+            code_to_events("hello"),  # cursor at end of line
+            [Event(evt="key", data="\x04", raw=bytearray(b"\x04"))],  # Ctrl+D
+        )
+        reader, _ = handle_all_events(events)
+        self.assertEqual("hello", "".join(reader.buffer))
+
+
+@skipUnless(sys.platform == "win32", "windows console only")
+class TestWindowsConsoleEolWrap(TestCase):
+    def _make_mock_console(self, width=80):
+        from _pyrepl import windows_console as wc
+
+        console = object.__new__(wc.WindowsConsole)
+
+        console.width = width
+        console.posxy = (0, 0)
+        console.screen = [""]
+
+        console._hide_cursor = Mock()
+        console._show_cursor = Mock()
+        console._erase_to_end = Mock()
+        console._move_relative = Mock()
+        console.move_cursor = Mock()
+        console._WindowsConsole__write = Mock()
+
+        return console, wc
+
+    def test_short_line_sets_posxy_normally(self):
+        width = 10
+        y = 3
+        console, wc = self._make_mock_console(width=width)
+        old_line = ""
+        new_line = "a" * 3
+        wc.WindowsConsole._WindowsConsole__write_changed_line(
+            console, y, old_line, new_line, 0
+        )
+        self.assertEqual(console.posxy, (3, y))
+
+    def test_exact_width_line_does_not_wrap(self):
+        width = 10
+        y = 3
+        console, wc = self._make_mock_console(width=width)
+        old_line = ""
+        new_line = "a" * width
+
+        wc.WindowsConsole._WindowsConsole__write_changed_line(
+            console, y, old_line, new_line, 0
+        )
+        self.assertEqual(console.posxy, (width - 1, y))

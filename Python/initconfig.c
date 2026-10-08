@@ -238,32 +238,32 @@ The following implementation-specific options are available:\n\
 /* Envvars that don't have equivalent command-line options are listed first */
 static const char usage_envvars[] =
 "Environment variables that change behavior:\n"
-"PYTHONSTARTUP   : file executed on interactive startup (no default)\n"
-"PYTHONPATH      : '%lc'-separated list of directories prefixed to the\n"
-"                  default module search path.  The result is sys.path.\n"
-"PYTHONHOME      : alternate <prefix> directory (or <prefix>%lc<exec_prefix>).\n"
-"                  The default module search path uses %s.\n"
-"PYTHONPLATLIBDIR: override sys.platlibdir\n"
+"PYTHONBREAKPOINT: if this variable is set to 0, it disables the default\n"
+"                  debugger.  It can be set to the callable of your debugger of\n"
+"                  choice.\n"
 "PYTHONCASEOK    : ignore case in 'import' statements (Windows)\n"
-"PYTHONIOENCODING: encoding[:errors] used for stdin/stdout/stderr\n"
-"PYTHONHASHSEED  : if this variable is set to 'random', a random value is used\n"
-"                  to seed the hashes of str and bytes objects.  It can also be\n"
-"                  set to an integer in the range [0,4294967295] to get hash\n"
-"                  values with a predictable seed.\n"
-"PYTHONMALLOC    : set the Python memory allocators and/or install debug hooks\n"
-"                  on Python memory allocators.  Use PYTHONMALLOC=debug to\n"
-"                  install debug hooks.\n"
 "PYTHONCOERCECLOCALE: if this variable is set to 0, it disables the locale\n"
 "                  coercion behavior.  Use PYTHONCOERCECLOCALE=warn to request\n"
 "                  display of locale coercion and locale compatibility warnings\n"
 "                  on stderr.\n"
-"PYTHONBREAKPOINT: if this variable is set to 0, it disables the default\n"
-"                  debugger.  It can be set to the callable of your debugger of\n"
-"                  choice.\n"
 "PYTHON_COLORS   : if this variable is set to 1, the interpreter will colorize\n"
 "                  various kinds of output.  Setting it to 0 deactivates\n"
 "                  this behavior.\n"
+"PYTHONHASHSEED  : if this variable is set to 'random', a random value is used\n"
+"                  to seed the hashes of str and bytes objects.  It can also be\n"
+"                  set to an integer in the range [0,4294967295] to get hash\n"
+"                  values with a predictable seed.\n"
 "PYTHON_HISTORY  : the location of a .python_history file.\n"
+"PYTHONHOME      : alternate <prefix> directory (or <prefix>%lc<exec_prefix>).\n"
+"                  The default module search path uses %s.\n"
+"PYTHONIOENCODING: encoding[:errors] used for stdin/stdout/stderr\n"
+"PYTHONMALLOC    : set the Python memory allocators and/or install debug hooks\n"
+"                  on Python memory allocators.  Use PYTHONMALLOC=debug to\n"
+"                  install debug hooks.\n"
+"PYTHONPATH      : '%lc'-separated list of directories prefixed to the\n"
+"                  default module search path.  The result is sys.path.\n"
+"PYTHONPLATLIBDIR: override sys.platlibdir\n"
+"PYTHONSTARTUP   : file executed on interactive startup (no default)\n"
 "\n"
 "These variables have equivalent command-line options (see --help for details):\n"
 "PYTHON_CPU_COUNT: override the return value of os.cpu_count() (-X cpu_count)\n"
@@ -353,7 +353,7 @@ _Py_COMP_DIAG_IGNORE_DEPR_DECLS
         do { \
             obj = (EXPR); \
             if (obj == NULL) { \
-                return NULL; \
+                goto fail; \
             } \
             int res = PyDict_SetItemString(dict, (KEY), obj); \
             Py_DECREF(obj); \
@@ -1576,7 +1576,9 @@ config_read_env_vars(PyConfig *config)
     _Py_get_env_flag(use_env, &config->parser_debug, "PYTHONDEBUG");
     _Py_get_env_flag(use_env, &config->verbose, "PYTHONVERBOSE");
     _Py_get_env_flag(use_env, &config->optimization_level, "PYTHONOPTIMIZE");
-    _Py_get_env_flag(use_env, &config->inspect, "PYTHONINSPECT");
+    if (!config->inspect && _Py_GetEnv(use_env, "PYTHONINSPECT")) {
+        config->inspect = 1;
+    }
 
     int dont_write_bytecode = 0;
     _Py_get_env_flag(use_env, &dont_write_bytecode, "PYTHONDONTWRITEBYTECODE");
@@ -2064,8 +2066,30 @@ config_init_stdio_encoding(PyConfig *config,
 
     /* Choose the default error handler based on the current locale. */
     if (config->stdio_encoding == NULL) {
-        status = config_get_locale_encoding(config, preconfig,
-                                            &config->stdio_encoding);
+#ifdef MS_WINDOWS
+        /* gh-86427: use the console code page.  Only one encoding can be
+           specified, so the output code page is used: it affects two
+           streams of three. */
+        UINT cp = config->legacy_windows_stdio ? GetConsoleOutputCP() : 0;
+        if (cp != 0) {
+            if (cp == CP_UTF8) {
+                status = PyConfig_SetString(config, &config->stdio_encoding,
+                                            L"utf-8");
+            }
+            else {
+                wchar_t encoding[20];
+                swprintf(encoding, Py_ARRAY_LENGTH(encoding), L"cp%u",
+                         (unsigned int)cp);
+                status = PyConfig_SetString(config, &config->stdio_encoding,
+                                            encoding);
+            }
+        }
+        else
+#endif
+        {
+            status = config_get_locale_encoding(config, preconfig,
+                                                &config->stdio_encoding);
+        }
         if (_PyStatus_EXCEPTION(status)) {
             return status;
         }
@@ -2405,7 +2429,7 @@ config_usage(int error, const wchar_t* program)
 static void
 config_envvars_usage(void)
 {
-    printf(usage_envvars, (wint_t)DELIM, (wint_t)DELIM, PYTHONHOMEHELP);
+    printf(usage_envvars, (wint_t)DELIM, PYTHONHOMEHELP, (wint_t)DELIM);
 }
 
 static void

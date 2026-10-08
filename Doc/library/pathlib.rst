@@ -311,7 +311,7 @@ Pure paths provide the following methods and properties:
 .. attribute:: PurePath.parser
 
    The implementation of the :mod:`os.path` module used for low-level path
-   parsing and joining: either :mod:`posixpath` or :mod:`ntpath`.
+   parsing and joining: either :mod:`!posixpath` or :mod:`!ntpath`.
 
    .. versionadded:: 3.13
 
@@ -1287,6 +1287,10 @@ Reading directories
        PosixPath('setup.py'),
        PosixPath('test_pathlib.py')]
 
+   .. note::
+      The paths are returned in no particular order.
+      If you need a specific order, sort the results.
+
    .. seealso::
       :ref:`pathlib-pattern-language` documentation.
 
@@ -1298,6 +1302,11 @@ Reading directories
    By default, or when the *recurse_symlinks* keyword-only argument is set to
    ``False``, this method follows symlinks except when expanding "``**``"
    wildcards. Set *recurse_symlinks* to ``True`` to always follow symlinks.
+
+   .. note::
+      Any :exc:`OSError` exceptions raised from scanning the filesystem are
+      suppressed. This includes :exc:`PermissionError` when accessing
+      directories without read permission.
 
    .. audit-event:: pathlib.Path.glob self,pattern pathlib.Path.glob
 
@@ -1320,6 +1329,15 @@ Reading directories
 
    Glob the given relative *pattern* recursively.  This is like calling
    :func:`Path.glob` with "``**/``" added in front of the *pattern*.
+
+   .. note::
+      The paths are returned in no particular order.
+      If you need a specific order, sort the results.
+
+   .. note::
+      Any :exc:`OSError` exceptions raised from scanning the filesystem are
+      suppressed. This includes :exc:`PermissionError` when accessing
+      directories without read permission.
 
    .. seealso::
       :ref:`pathlib-pattern-language` and :meth:`Path.glob` documentation.

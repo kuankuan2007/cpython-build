@@ -814,6 +814,15 @@ class ClassPropertiesAndMethods(unittest.TestCase, ExtraAssertions):
             class X(int(), C):
                 pass
 
+    @unittest.skipIf(_testcapi is None, 'need the _testcapi module')
+    def test_type_with_null_new_metaclass(self):
+        metaclass = _testcapi.HeapCTypeMetaclassNullNew
+        base = _testcapi.pytype_fromspec_meta(metaclass)
+
+        # Exercise type_new's metaclass selection path, not a direct call.
+        with self.assertRaisesRegex(TypeError, r"cannot create '.*' instances"):
+            type("Derived", (base,), {})
+
     def test_module_subclasses(self):
         # Testing Python subclass of module...
         log = []
@@ -1661,6 +1670,28 @@ class ClassPropertiesAndMethods(unittest.TestCase, ExtraAssertions):
         with self.assertRaises(TypeError) as cm:
             spam_cm.__get__(None, list)
         self.assertEqual(str(cm.exception), expected_errmsg)
+
+    @support.cpython_only
+    def test_method_get_meth_method_invalid_type(self):
+        # gh-146615: method_get() for METH_METHOD descriptors used to pass
+        # Py_TYPE(type)->tp_name as the %V fallback instead of the separate
+        # %s argument, causing a missing argument for %s and a crash.
+        # Verify the error message is correct when __get__() is called with a
+        # non-type as the second argument.
+        #
+        # METH_METHOD|METH_FASTCALL|METH_KEYWORDS is the only flag combination
+        # that enters the affected branch in method_get().
+        import io
+
+        obj = io.StringIO()
+        descr = io.TextIOBase.read
+
+        with self.assertRaises(TypeError) as cm:
+            descr.__get__(obj, "not_a_type")
+        self.assertEqual(
+            str(cm.exception),
+            "descriptor 'read' needs a type, not 'str', as arg 2",
+        )
 
     def test_staticmethods(self):
         # Testing static methods...
@@ -5064,6 +5095,26 @@ class ClassPropertiesAndMethods(unittest.TestCase, ExtraAssertions):
 
         with self.assertRaisesRegex(NotImplementedError, "BAR"):
             B().foo
+
+    def test_staticmethod_new(self):
+        class MyStaticMethod(staticmethod):
+            def __init__(self, func):
+                pass
+        def func(): pass
+        sm = MyStaticMethod(func)
+        self.assertEqual(repr(sm), '<staticmethod(None)>')
+        self.assertIsNone(sm.__func__)
+        self.assertIsNone(sm.__wrapped__)
+
+    def test_classmethod_new(self):
+        class MyClassMethod(classmethod):
+            def __init__(self, func):
+                pass
+        def func(): pass
+        cm = MyClassMethod(func)
+        self.assertEqual(repr(cm), '<classmethod(None)>')
+        self.assertIsNone(cm.__func__)
+        self.assertIsNone(cm.__wrapped__)
 
 
 class DictProxyTests(unittest.TestCase):

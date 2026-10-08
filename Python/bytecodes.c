@@ -148,7 +148,15 @@ dummy_func(
 
         tier1 inst(RESUME, (--)) {
             assert(frame == tstate->current_frame);
-            if (tstate->tracing == 0) {
+            #ifdef Py_GIL_DISABLED
+            // For thread-safety, we need to check instrumentation version
+            // even when tracing. Otherwise, another thread may concurrently
+            // re-write the bytecode while we are executing this function.
+            int check_instrumentation = 1;
+            #else
+            int check_instrumentation = (tstate->tracing == 0);
+            #endif
+            if (check_instrumentation) {
                 uintptr_t global_version =
                     _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) &
                     ~_PY_EVAL_EVENTS_MASK;
@@ -3205,6 +3213,7 @@ dummy_func(
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION +
+            _CHECK_RECURSION_REMAINING +
             _PY_FRAME_GENERAL +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
@@ -3232,6 +3241,9 @@ dummy_func(
         macro(CALL_BOUND_METHOD_GENERAL) =
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
+            // gh-145008: We must check recursion before expanding method,
+            // otherwise we may leave the stack in an inconsistent state in 3.13.
+            _CHECK_RECURSION_REMAINING +
             _CHECK_METHOD_VERSION +
             _EXPAND_METHOD +
             _PY_FRAME_GENERAL +
@@ -3302,6 +3314,9 @@ dummy_func(
             PyFunctionObject *func = (PyFunctionObject *)callable;
             PyCodeObject *code = (PyCodeObject *)func->func_code;
             DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
+        }
+
+        op(_CHECK_RECURSION_REMAINING, (--)) {
             DEOPT_IF(tstate->py_recursion_remaining <= 1);
         }
 
@@ -3339,6 +3354,7 @@ dummy_func(
             _INIT_CALL_BOUND_METHOD_EXACT_ARGS +
             _CHECK_FUNCTION_EXACT_ARGS +
             _CHECK_STACK_SPACE +
+            _CHECK_RECURSION_REMAINING +
             _INIT_CALL_PY_EXACT_ARGS +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
@@ -3348,6 +3364,7 @@ dummy_func(
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_EXACT_ARGS +
             _CHECK_STACK_SPACE +
+            _CHECK_RECURSION_REMAINING +
             _INIT_CALL_PY_EXACT_ARGS +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;

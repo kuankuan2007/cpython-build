@@ -33,16 +33,6 @@ Pending Removal in Python 3.15
 
   * ``load_module()`` method: use ``exec_module()`` instead.
 
-* :class:`locale`:
-
-  * The :func:`~locale.getdefaultlocale` function
-    has been deprecated since Python 3.11.
-    Its removal was originally planned for Python 3.13 (:gh:`90817`),
-    but has been postponed to Python 3.15.
-    Use :func:`~locale.getlocale`, :func:`~locale.setlocale`,
-    and :func:`~locale.getencoding` instead.
-    (Contributed by Hugo van Kemenade in :gh:`111187`.)
-
 * :mod:`pathlib`:
 
   * :meth:`.PurePath.is_reserved`
@@ -64,7 +54,7 @@ Pending Removal in Python 3.15
 
   * :func:`~threading.RLock` will take no arguments in Python 3.15.
     Passing any arguments has been deprecated since Python 3.14,
-    as the  Python version does not permit any arguments,
+    as the Python version does not permit any arguments,
     but the C version allows any number of positional or keyword arguments,
     ignoring every argument.
 
@@ -92,7 +82,7 @@ Pending Removal in Python 3.15
     Use ``class TD(TypedDict): pass`` or ``TD = TypedDict("TD", {})``
     to create a TypedDict with zero field.
 
-  * The :func:`typing.no_type_check_decorator` decorator function
+  * The :deco:`typing.no_type_check_decorator` decorator function
     has been deprecated since Python 3.13.
     After eight years in the :mod:`typing` module,
     it has yet to be supported by any major type checker.

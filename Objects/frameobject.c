@@ -963,7 +963,7 @@ static PyObject *
 frame_getback(PyFrameObject *f, void *closure)
 {
     PyObject *res = (PyObject *)PyFrame_GetBack(f);
-    if (res == NULL) {
+    if (res == NULL  && !PyErr_Occurred()) {
         Py_RETURN_NONE;
     }
     return res;
@@ -979,6 +979,11 @@ frame_gettrace_opcodes(PyFrameObject *f, void *closure)
 static int
 frame_settrace_opcodes(PyFrameObject *f, PyObject* value, void *Py_UNUSED(ignored))
 {
+    if (value == NULL) {
+        PyErr_SetString(PyExc_AttributeError,
+                        "cannot delete attribute f_trace_opcodes");
+        return -1;
+    }
     if (!PyBool_Check(value)) {
         PyErr_SetString(PyExc_TypeError,
                         "attribute value type must be bool");
@@ -2093,6 +2098,9 @@ _PyFrame_GetLocals(_PyInterpreterFrame *frame)
     }
 
     PyFrameObject* f = _PyFrame_GetFrameObject(frame);
+    if (f == NULL) {
+        return NULL;
+    }
 
     return _PyFrameLocalsProxy_New(f);
 }
@@ -2200,6 +2208,9 @@ PyFrame_GetBack(PyFrameObject *frame)
         prev = _PyFrame_GetFirstComplete(prev);
         if (prev) {
             back = _PyFrame_GetFrameObject(prev);
+            if (back == NULL) {
+                 return NULL;
+             }
         }
     }
     return (PyFrameObject*)Py_XNewRef(back);

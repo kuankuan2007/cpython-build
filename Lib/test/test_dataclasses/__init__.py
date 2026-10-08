@@ -2567,6 +2567,55 @@ class TestEq(unittest.TestCase):
         self.assertEqual(C(1), 5)
         self.assertNotEqual(C(1), 1)
 
+    def test_eq_field_by_field(self):
+        @dataclasses.dataclass
+        class Point:
+            x: int
+            y: int
+
+        p1 = Point(1, 2)
+        p2 = Point(1, 2)
+        p3 = Point(2, 1)
+        self.assertEqual(p1, p2)
+        self.assertNotEqual(p1, p3)
+
+    def test_eq_type_check(self):
+        @dataclasses.dataclass
+        class A:
+            x: int
+
+        @dataclasses.dataclass
+        class B:
+            x: int
+
+        a = A(1)
+        b = B(1)
+        self.assertNotEqual(a, b)
+
+    def test_eq_custom_field(self):
+        class AlwaysEqual(int):
+            def __eq__(self, other):
+                return True
+
+        @dataclasses.dataclass
+        class Foo:
+            x: AlwaysEqual
+            y: int
+
+        f1 = Foo(AlwaysEqual(1), 2)
+        f2 = Foo(AlwaysEqual(2), 2)
+        self.assertEqual(f1, f2)
+
+    def test_eq_nan_field(self):
+        @dataclasses.dataclass
+        class D:
+            x: float
+
+        nan = float('nan')
+        d1 = D(nan)
+        d2 = D(nan)
+        self.assertNotEqual(d1, d2)
+
 
 class TestOrdering(unittest.TestCase):
     def test_functools_total_ordering(self):
@@ -2865,29 +2914,41 @@ class TestHash(unittest.TestCase):
 
 
 class TestFrozen(unittest.TestCase):
-    def test_frozen(self):
-        @dataclass(frozen=True)
-        class C:
-            i: int
+    # Some tests have a subtest with a slotted dataclass.
+    # See https://github.com/python/cpython/issues/105936 for the reasons.
 
-        c = C(10)
-        self.assertEqual(c.i, 10)
-        with self.assertRaises(FrozenInstanceError):
-            c.i = 5
-        self.assertEqual(c.i, 10)
+    def test_frozen(self):
+        for slots in (False, True):
+            with self.subTest(slots=slots):
+
+                @dataclass(frozen=True, slots=slots)
+                class C:
+                    i: int
+
+                c = C(10)
+                self.assertEqual(c.i, 10)
+                with self.assertRaises(FrozenInstanceError):
+                    c.i = 5
+                self.assertEqual(c.i, 10)
+                with self.assertRaises(FrozenInstanceError):
+                    del c.i
+                self.assertEqual(c.i, 10)
 
     def test_frozen_empty(self):
-        @dataclass(frozen=True)
-        class C:
-            pass
+        for slots in (False, True):
+            with self.subTest(slots=slots):
 
-        c = C()
-        self.assertFalse(hasattr(c, 'i'))
-        with self.assertRaises(FrozenInstanceError):
-            c.i = 5
-        self.assertFalse(hasattr(c, 'i'))
-        with self.assertRaises(FrozenInstanceError):
-            del c.i
+                @dataclass(frozen=True, slots=slots)
+                class C:
+                    pass
+
+                c = C()
+                self.assertFalse(hasattr(c, 'i'))
+                with self.assertRaises(FrozenInstanceError):
+                    c.i = 5
+                self.assertFalse(hasattr(c, 'i'))
+                with self.assertRaises(FrozenInstanceError):
+                    del c.i
 
     def test_inherit(self):
         @dataclass(frozen=True)
@@ -3083,41 +3144,123 @@ class TestFrozen(unittest.TestCase):
                 d.i = 5
 
     def test_non_frozen_normal_derived(self):
-        # See bpo-32953.
+        # See bpo-32953 and https://github.com/python/cpython/issues/105936
+        for slots in (False, True):
+            with self.subTest(slots=slots):
 
-        @dataclass(frozen=True)
-        class D:
-            x: int
-            y: int = 10
+                @dataclass(frozen=True, slots=slots)
+                class D:
+                    x: int
+                    y: int = 10
+                    z: int = 1
 
-        class S(D):
-            pass
+                    @property
+                    def readonly(self) -> int:
+                        return self.x
 
-        s = S(3)
-        self.assertEqual(s.x, 3)
-        self.assertEqual(s.y, 10)
-        s.cached = True
+                    @property
+                    def prop(self) -> int:
+                        return self.z
 
-        # But can't change the frozen attributes.
-        with self.assertRaises(FrozenInstanceError):
-            s.x = 5
-        with self.assertRaises(FrozenInstanceError):
-            s.y = 5
-        self.assertEqual(s.x, 3)
-        self.assertEqual(s.y, 10)
-        self.assertEqual(s.cached, True)
+                    @prop.setter
+                    def prop(self, val: int) -> None:
+                        object.__setattr__(self, 'z', val)
 
-        with self.assertRaises(FrozenInstanceError):
-            del s.x
-        self.assertEqual(s.x, 3)
-        with self.assertRaises(FrozenInstanceError):
-            del s.y
-        self.assertEqual(s.y, 10)
-        del s.cached
-        self.assertFalse(hasattr(s, 'cached'))
-        with self.assertRaises(AttributeError) as cm:
-            del s.cached
-        self.assertNotIsInstance(cm.exception, FrozenInstanceError)
+                    @prop.deleter
+                    def prop(self) -> None:
+                        object.__setattr__(self, 'z', 0)
+
+                d = D(5)
+                self.assertEqual(d.x, 5)
+                self.assertEqual(d.y, 10)
+                self.assertEqual(d.z, 1)
+                self.assertEqual(d.readonly, 5)
+                self.assertEqual(d.prop, 1)
+
+                with self.assertRaises(FrozenInstanceError):
+                    d.x = 5
+                with self.assertRaises(FrozenInstanceError):
+                    d.readonly = 5
+                with self.assertRaises(FrozenInstanceError):
+                    d.z = 5
+                with self.assertRaises(FrozenInstanceError):
+                    d.prop = 5
+                with self.assertRaises(FrozenInstanceError):
+                    del d.prop
+
+                self.assertEqual(d.x, 5)
+                self.assertEqual(d.y, 10)
+                self.assertEqual(d.z, 1)
+                self.assertEqual(d.readonly, 5)
+                self.assertEqual(d.prop, 1)
+
+                class S(D):
+                    pass
+
+                s = S(3)
+                self.assertEqual(s.x, 3)
+                self.assertEqual(s.y, 10)
+                self.assertEqual(s.z, 1)
+                self.assertEqual(s.readonly, 3)
+                self.assertEqual(s.prop, 1)
+                # Can set new attrs:
+                s.cached = True
+                self.assertTrue(s.cached)
+                # Can mutate them:
+                s.cached = False
+                self.assertFalse(s.cached)
+
+                # Can also change writable properties:
+                with self.assertRaisesRegex(
+                    AttributeError,
+                    'object has no setter',
+                ) as cm:
+                    s.readonly = 5
+                self.assertNotIsInstance(cm.exception, FrozenInstanceError)
+                s.prop = 2
+                self.assertEqual(s.x, 3)
+                self.assertEqual(s.readonly, 3)
+                self.assertEqual(s.prop, 2)
+                self.assertEqual(s.z, 2)
+
+                # But can't change the frozen attributes.
+                with self.assertRaises(FrozenInstanceError):
+                    s.x = 5
+                with self.assertRaises(FrozenInstanceError):
+                    s.y = 5
+                with self.assertRaises(FrozenInstanceError):
+                    s.z = 5
+                self.assertEqual(s.x, 3)
+                self.assertEqual(s.y, 10)
+                self.assertEqual(s.z, 2)
+                self.assertIs(s.cached, False)
+
+                with self.assertRaises(FrozenInstanceError):
+                    del s.x
+                self.assertEqual(s.x, 3)
+                with self.assertRaises(FrozenInstanceError):
+                    del s.y
+                self.assertEqual(s.y, 10)
+                with self.assertRaisesRegex(
+                    AttributeError,
+                    'object has no deleter',
+                ) as cm:
+                    del s.readonly
+                self.assertNotIsInstance(cm.exception, FrozenInstanceError)
+                self.assertEqual(s.x, 3)
+                self.assertEqual(s.readonly, 3)
+                del s.cached
+                self.assertFalse(hasattr(s, 'cached'))
+                with self.assertRaisesRegex(
+                    AttributeError,
+                    "object has no attribute 'cached'",
+                ) as cm:
+                    del s.cached
+                self.assertNotIsInstance(cm.exception, FrozenInstanceError)
+                del s.prop
+                self.assertEqual(s.z, 0)
+                self.assertEqual(s.prop, 0)
+                del s.prop
 
     def test_non_frozen_normal_derived_from_empty_frozen(self):
         @dataclass(frozen=True)
@@ -3756,6 +3899,50 @@ class TestSlots(unittest.TestCase):
         # and once for `WithCorrectSuper__slots__` new class
         # that we create internally.
         self.assertEqual(CorrectSuper.args, ["default", "default"])
+
+    def test_empty_class_cell(self):
+        # gh-148947: Make sure that we explicitly handle the empty class cell.
+        def maker():
+            if False:
+                __class__ = 42
+
+            def method(self):
+                return __class__
+            return method
+
+        from dataclasses import dataclass
+
+        @dataclass(slots=True)
+        class X:
+            a: int
+
+            meth = maker()
+
+        with self.assertRaisesRegex(NameError, '__class__'):
+            X(1).meth()
+
+    def test_class_cell_from_other_class(self):
+        # This test fails without the "is oldcls" check in
+        # _update_func_cell_for__class__.
+        class Base:
+            def meth(self):
+                return "Base"
+
+        class Child(Base):
+            def meth(self):
+                return super().meth() + " Child"
+
+        @dataclass(slots=True)
+        class DC(Child):
+            a: int
+
+            meth = Child.meth
+
+        closure = DC.meth.__closure__
+        self.assertEqual(len(closure), 1)
+        self.assertIs(closure[0].cell_contents, Child)
+
+        self.assertEqual(DC(1).meth(), "Base Child")
 
 
 class TestDescriptors(unittest.TestCase):

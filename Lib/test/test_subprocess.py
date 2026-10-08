@@ -21,6 +21,7 @@ import selectors
 import sysconfig
 import select
 import shutil
+import socket
 import threading
 import gc
 import textwrap
@@ -956,6 +957,48 @@ class ProcessTestCase(BaseTestCase):
         self.assertEqual(stdout, b"banana")
         self.assertEqual(stderr, b"pineapple")
 
+    def test_communicate_memoryview_input(self):
+        # Test memoryview input with byte elements
+        test_data = b"Hello, memoryview!"
+        mv = memoryview(test_data)
+        p = subprocess.Popen([sys.executable, "-c",
+                              'import sys; sys.stdout.write(sys.stdin.read())'],
+                             stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE)
+        self.addCleanup(p.stdout.close)
+        self.addCleanup(p.stdin.close)
+        (stdout, stderr) = p.communicate(mv)
+        self.assertEqual(stdout, test_data)
+        self.assertIsNone(stderr)
+
+    def test_communicate_memoryview_input_nonbyte(self):
+        # Test memoryview input with non-byte elements (e.g., int32)
+        # This tests the fix for gh-134453 where non-byte memoryviews
+        # had incorrect length tracking on POSIX
+        import array
+        # Create an array of 32-bit integers that's large enough to trigger
+        # the chunked writing behavior (> PIPE_BUF)
+        pipe_buf = getattr(select, 'PIPE_BUF', 512)
+        # Each 'i' element is 4 bytes, so we need more than pipe_buf/4 elements
+        # Add some extra to ensure we exceed the buffer size
+        num_elements = pipe_buf + 1
+        test_array = array.array('i', [0x64306f66 for _ in range(num_elements)])
+        expected_bytes = test_array.tobytes()
+        mv = memoryview(test_array)
+
+        p = subprocess.Popen([sys.executable, "-c",
+                              'import sys; '
+                              'data = sys.stdin.buffer.read(); '
+                              'sys.stdout.buffer.write(data)'],
+                             stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE)
+        self.addCleanup(p.stdout.close)
+        self.addCleanup(p.stdin.close)
+        (stdout, stderr) = p.communicate(mv)
+        self.assertEqual(stdout, expected_bytes,
+                         msg=f"{len(stdout)=} =? {len(expected_bytes)=}")
+        self.assertIsNone(stderr)
+
     def test_communicate_timeout(self):
         p = subprocess.Popen([sys.executable, "-c",
                               'import sys,os,time;'
@@ -990,6 +1033,101 @@ class ProcessTestCase(BaseTestCase):
         self.assertRaises(subprocess.TimeoutExpired, p.communicate, timeout=0.4)
         (stdout, _) = p.communicate()
         self.assertEqual(len(stdout), 4 * 64 * 1024)
+
+    def test_communicate_timeout_large_input(self):
+        # Test that timeout is enforced when writing large input to a
+        # slow-to-read subprocess, and that partial input is preserved
+        # for continuation after timeout (gh-141473).
+        #
+        # This is a regression test for Windows matching POSIX behavior.
+        # On POSIX, select() is used to multiplex I/O with timeout checking.
+        # On Windows, stdin writing must also honor the timeout rather than
+        # blocking indefinitely when the pipe buffer fills.
+
+        input_data = b"x" * (128 * 1024)  # > typical pipe buffer
+
+        # Cross-platform wake mechanism: the slow reader connects to a
+        # loopback TCP socket and blocks in select() on it (capped at 9s
+        # as a safety net we don't expect to hit). After phase 1 raises
+        # TimeoutExpired, the parent sends a byte to release the child so
+        # it drains stdin. A socket (rather than a raw pipe) is required
+        # because Windows select() only supports sockets, not arbitrary
+        # file descriptors.
+        server = socket.create_server(('127.0.0.1', 0), backlog=1)
+        server.settimeout(10)  # bound the accept() if the child fails to start
+        port = server.getsockname()[1]
+        # The child sends one byte (low byte of its PID) first so the parent
+        # can detect the rare case of an unrelated process on the same host
+        # connecting to our ephemeral port before our child does. A single
+        # byte gives 1/256 collision odds, which is plenty for flake-prevention.
+        slow_reader = (
+            "import os, socket, sys, select; "
+            f"s = socket.create_connection(('127.0.0.1', {port}), timeout=9); "
+            "s.sendall(bytes([os.getpid() & 0xff])); "
+            "select.select([s], [], [], 9); "
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())"
+        )
+
+        p = subprocess.Popen(
+            [sys.executable, "-c", slow_reader],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+
+        conn = None
+        try:
+            conn, _ = server.accept()
+            server.close()
+            server = None
+
+            conn.settimeout(5)
+            peer_byte = conn.recv(1)
+            conn.settimeout(None)
+            self.assertEqual(peer_byte, bytes([p.pid & 0xff]),
+                f"loopback handshake byte {peer_byte!r} != "
+                f"low byte of child PID {p.pid} ({p.pid & 0xff:#x})")
+
+            timeout = 0.2
+            start = time.monotonic()
+            try:
+                p.communicate(input_data, timeout=timeout)
+                # If we get here without TimeoutExpired, the timeout was ignored
+                elapsed = time.monotonic() - start
+                self.fail(
+                    f"TimeoutExpired not raised. communicate() completed in "
+                    f"{elapsed:.2f}s, but slow reader stalls for up to 9s. "
+                    "Stdin writing blocked without enforcing timeout.")
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start
+
+            # Timeout should occur close to the specified timeout value,
+            # not after waiting for the subprocess to finish sleeping.
+            # Allow generous margin for slow CI, but must be well under
+            # the slow-reader's stall cap.
+            self.assertLess(elapsed, 5.0,
+                f"TimeoutExpired raised after {elapsed:.2f}s; expected ~{timeout}s. "
+                "Stdin writing blocked without checking timeout.")
+
+            # Release the slow reader so it stops blocking and drains stdin.
+            conn.sendall(b'go')
+            conn.close()
+            conn = None
+
+            # After timeout, continue communication. The remaining input
+            # should be sent and we should receive all data back.
+            stdout, stderr = p.communicate()
+
+            # Verify all input was eventually received by the subprocess
+            self.assertEqual(len(stdout), len(input_data),
+                f"Expected {len(input_data)} bytes output but got {len(stdout)}")
+            self.assertEqual(stdout, input_data)
+        finally:
+            if conn is not None:
+                conn.close()
+            if server is not None:
+                server.close()
+            p.kill()
+            p.wait()
 
     # Test for the fd leak reported in http://bugs.python.org/issue2791.
     def test_communicate_pipe_fd_leak(self):
@@ -1060,6 +1198,19 @@ class ProcessTestCase(BaseTestCase):
         (stdout, stderr) = p.communicate(b"split")
         self.assertEqual(stdout, b"bananasplit")
         self.assertEqual(stderr, b"")
+
+    def test_communicate_stdin_closed_before_call(self):
+        # gh-70560, gh-74389: stdin.close() before communicate()
+        # should not raise ValueError from stdin.flush()
+        with subprocess.Popen([sys.executable, "-c",
+                               'import sys; sys.exit(0)'],
+                              stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE) as p:
+            p.stdin.close()  # Close stdin before communicate
+            # This should not raise ValueError
+            (stdout, stderr) = p.communicate()
+            self.assertEqual(p.returncode, 0)
 
     def test_universal_newlines_and_text(self):
         args = [
@@ -1642,6 +1793,40 @@ class ProcessTestCase(BaseTestCase):
 
             self.assertEqual(proc.wait(), 0)
 
+    def test_post_timeout_communicate_sends_input(self):
+        """GH-141473 regression test; the stdin pipe must close"""
+        with subprocess.Popen(
+                [sys.executable, "-uc", """\
+import sys
+while c := sys.stdin.read(512):
+    sys.stdout.write(c)
+print()
+"""],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+        ) as proc:
+            try:
+                data = f"spam{'#'*4096}beans"
+                proc.communicate(
+                    input=data,
+                    timeout=0,
+                )
+            except subprocess.TimeoutExpired as exc:
+                pass
+            # Prior to the bugfix, this would hang as the stdin
+            # pipe to the child had not been closed.
+            try:
+                stdout, stderr = proc.communicate(timeout=15)
+            except subprocess.TimeoutExpired as exc:
+                self.fail("communicate() hung waiting on child process that should have seen its stdin pipe close and exit")
+            self.assertEqual(
+                    proc.returncode, 0,
+                    msg=f"STDERR:\n{stderr}\nSTDOUT:\n{stdout}")
+            self.assertTrue(stdout.startswith("spam"), msg=stdout)
+            self.assertIn("beans", stdout)
+
 
 class RunFuncTestCase(BaseTestCase):
     def run_python(self, code, **kwargs):
@@ -1830,8 +2015,9 @@ class RunFuncTestCase(BaseTestCase):
             run("echo hello", shell=True, text=True)
             check_output("echo hello", shell=True, text=True)
             """)
+        env = support.make_clean_env()
         cp = subprocess.run([sys.executable, "-Xwarn_default_encoding", "-c", code],
-                            capture_output=True)
+                            capture_output=True, env=env)
         lines = cp.stderr.splitlines()
         self.assertEqual(len(lines), 2, lines)
         self.assertTrue(lines[0].startswith(b"<string>:2: EncodingWarning: "))
@@ -2227,6 +2413,16 @@ class POSIXProcessTestCase(BaseTestCase):
         err = subprocess.CalledProcessError(2, "fake cmd")
         error_string = str(err)
         self.assertIn("non-zero exit status 2.", error_string)
+
+        # returncode which is not an integer, which happens for example when
+        # Popen is mocked: str() must not fail
+        for returncode in (None, "2", 2.5, [2]):
+            with self.subTest(returncode=returncode):
+                err = subprocess.CalledProcessError(returncode, "fake cmd")
+                self.assertEqual(
+                    str(err),
+                    f"Command 'fake cmd' returned non-zero "
+                    f"exit status {returncode}.")
 
     def test_preexec(self):
         # DISCLAIMER: Setting environment variables is *not* a good use
@@ -3576,13 +3772,17 @@ class Win32ProcessTestCase(BaseTestCase):
             self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
             self.assertEqual(startupinfo.lpAttributeList, {"handle_list": []})
 
+    # CREATE_NEW_CONSOLE creates a "popup" window.
+    @support.requires_resource('gui')
     def test_creationflags(self):
         # creationflags argument
         CREATE_NEW_CONSOLE = 16
         sys.stderr.write("    a DOS box should flash briefly ...\n")
-        subprocess.call(sys.executable +
-                        ' -c "import time; time.sleep(0.25)"',
-                        creationflags=CREATE_NEW_CONSOLE)
+        rc = subprocess.call(sys.executable +
+                             ' -c "import time; time.sleep(0.25)"',
+                             creationflags=CREATE_NEW_CONSOLE)
+        support.skip_on_low_desktop_heap_memory_subprocess(rc)
+        self.assertEqual(rc, 0)
 
     def test_invalid_args(self):
         # invalid arguments should raise ValueError

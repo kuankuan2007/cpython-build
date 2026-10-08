@@ -1,6 +1,5 @@
 import builtins
 import codecs
-import _datetime
 import gc
 import io
 import locale
@@ -588,6 +587,38 @@ class SysModuleTest(unittest.TestCase):
             leave_g.set()
             t.join()
 
+    @support.cpython_only
+    @requires_subinterpreters
+    @threading_helper.requires_working_threading()
+    def test_current_frames_other_interpreters(self):
+        # gh-158364: sys._current_frames() would access frames of another
+        # interpreter and crash
+        import threading
+
+        entered = threading.Event()
+        left = threading.Event()
+
+        def park():
+            entered.set()
+            left.wait()
+
+        t = threading.Thread(target=park)
+        with threading_helper.start_threads([t], unlock=left.set):
+            entered.wait()
+            interp = interpreters.create()
+            try:
+                interp.exec(f"""if True:
+                    import sys
+                    import threading
+
+                    frames = sys._current_frames()
+                    assert threading.get_ident() in frames, frames
+                    assert frames[threading.get_ident()].f_globals is globals()
+                    assert {t.ident} not in frames, frames
+                    """)
+            finally:
+                interp.close()
+
     @threading_helper.reap_threads
     @threading_helper.requires_working_threading()
     def test_current_exceptions(self):
@@ -654,6 +685,39 @@ class SysModuleTest(unittest.TestCase):
             # Reap the spawned thread.
             leave_g.set()
             t.join()
+
+    @support.cpython_only
+    @requires_subinterpreters
+    @threading_helper.requires_working_threading()
+    def test_current_exceptions_other_interpreters(self):
+        # gh-158364: sys._current_exceptions() would hand out exceptions of
+        # another interpreter and crash
+        import threading
+
+        entered = threading.Event()
+        left = threading.Event()
+
+        def hold():
+            # The thread has to be handling an exception, otherwise
+            # sys._current_exceptions() has nothing to report for it.
+            try:
+                raise ValueError
+            except ValueError:
+                entered.set()
+                left.wait()
+
+        t = threading.Thread(target=hold)
+        with threading_helper.start_threads([t], unlock=left.set):
+            entered.wait()
+            interp = interpreters.create()
+            try:
+                interp.exec(f"""if True:
+                    import sys
+
+                    assert {t.ident} not in sys._current_exceptions()
+                    """)
+            finally:
+                interp.close()
 
     def test_attributes(self):
         self.assertIsInstance(sys.api_version, int)
@@ -1495,6 +1559,7 @@ class UnraisableHookTest(unittest.TestCase):
     def test_custom_unraisablehook_fail(self):
         _testcapi = import_helper.import_module('_testcapi')
         from _testcapi import err_writeunraisable
+
         def hook_func(*args):
             raise Exception("hook_func failed")
 
@@ -1739,7 +1804,12 @@ class SizeofTest(unittest.TestCase):
             x = property(getx, setx, delx, "")
             check(x, size('5Pi'))
         # PyCapsule
-        check(_datetime.datetime_CAPI, size('6P'))
+        try:
+            import _datetime
+        except ModuleNotFoundError:
+            pass
+        else:
+            check(_datetime.datetime_CAPI, size('6P'))
         # rangeiterator
         check(iter(range(1)), size('3l'))
         check(iter(range(2**65)), size('3P'))

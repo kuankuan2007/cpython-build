@@ -1620,6 +1620,15 @@ class IDNACodecTest(unittest.TestCase):
         self.assertEqual("pyth\xf6n.org".encode("idna"), b"xn--pythn-mua.org")
         self.assertEqual("pyth\xf6n.org.".encode("idna"), b"xn--pythn-mua.org.")
 
+    @support.subTests(['unicode', 'encoded'], [
+        ('\N{CHEROKEE LETTER A}\N{CHEROKEE LETTER A}', b"xn--58da"),
+        ('\N{GEORGIAN CAPITAL LETTER AN}.', b"xn--7md."),
+        ('\N{CYRILLIC LETTER PALOCHKA}.example', b"xn--d5a.example"),
+        ('\N{ROMAN NUMERAL REVERSED ONE HUNDRED}.example.', b"xn--q5g.example."),
+    ])
+    def test_new_unicode_case_folding(self, unicode, encoded):
+        self.assertEqual(unicode.encode("idna"), encoded)
+
     def test_builtin_encode_invalid(self):
         for case, expected in self.invalid_encode_testcases:
             with self.subTest(case=case, expected=expected):
@@ -3820,6 +3829,17 @@ class CodecNameNormalizationTest(unittest.TestCase):
         self.assertEqual(normalize('UTF 8'), 'UTF_8')
         self.assertEqual(normalize('utf.8'), 'utf.8')
         self.assertEqual(normalize('utf...8'), 'utf...8')
+
+
+class CodecCacheTest(unittest.TestCase):
+    def test_cache_bounded(self):
+        for i in range(encodings._MAXCACHE + 1000):
+            try:
+                b'x'.decode(f'nonexist_{i}')
+            except LookupError:
+                pass
+
+        self.assertLessEqual(len(encodings._cache), encodings._MAXCACHE)
 
 
 if __name__ == "__main__":

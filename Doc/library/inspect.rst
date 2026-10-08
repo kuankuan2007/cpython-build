@@ -222,6 +222,9 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 +-----------------+-------------------+---------------------------+
 |                 | gi_running        | is the generator running? |
 +-----------------+-------------------+---------------------------+
+|                 | gi_suspended      | is the generator          |
+|                 |                   | suspended?                |
++-----------------+-------------------+---------------------------+
 |                 | gi_code           | code                      |
 +-----------------+-------------------+---------------------------+
 |                 | gi_yieldfrom      | object being iterated by  |
@@ -239,6 +242,9 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 +-----------------+-------------------+---------------------------+
 |                 | ag_running        | is the generator running? |
 +-----------------+-------------------+---------------------------+
+|                 | ag_suspended      | is the generator          |
+|                 |                   | suspended?                |
++-----------------+-------------------+---------------------------+
 |                 | ag_code           | code                      |
 +-----------------+-------------------+---------------------------+
 | coroutine       | __name__          | name                      |
@@ -251,6 +257,9 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 |                 | cr_frame          | frame                     |
 +-----------------+-------------------+---------------------------+
 |                 | cr_running        | is the coroutine running? |
++-----------------+-------------------+---------------------------+
+|                 | cr_suspended      | is the coroutine          |
+|                 |                   | suspended?                |
 +-----------------+-------------------+---------------------------+
 |                 | cr_code           | code                      |
 +-----------------+-------------------+---------------------------+
@@ -284,6 +293,19 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 .. versionchanged:: 3.10
 
    Add ``__builtins__`` attribute to functions.
+
+.. versionchanged:: 3.11
+
+   Add ``gi_suspended`` attribute to generators.
+
+.. versionchanged:: 3.11
+
+   Add ``cr_suspended`` attribute to coroutines.
+
+.. versionchanged:: 3.12
+
+   Add ``ag_suspended`` attribute to async generators.
+
 
 .. function:: getmembers(object[, predicate])
 
@@ -343,6 +365,9 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
    Return ``True`` if the object is a class, whether built-in or created in Python
    code.
 
+   This function returns ``False`` for :ref:`generic aliases <types-genericalias>` of classes,
+   such as ``list[int]``.
+
 
 .. function:: ismethod(object)
 
@@ -362,6 +387,10 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
    .. versionchanged:: 3.8
       Functions wrapped in :func:`functools.partial` now return ``True`` if the
       wrapped function is a Python generator function.
+
+   .. versionchanged:: 3.10.6
+      :term:`Duck-typed <duck-typing>` function-like objects now return
+      ``True`` if their code object has the :data:`CO_GENERATOR` flag.
 
    .. versionchanged:: 3.13
       Functions wrapped in :func:`functools.partialmethod` now return ``True``
@@ -384,6 +413,10 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
    .. versionchanged:: 3.8
       Functions wrapped in :func:`functools.partial` now return ``True`` if the
       wrapped function is a :term:`coroutine function`.
+
+   .. versionchanged:: 3.10.6
+      :term:`Duck-typed <duck-typing>` function-like objects now return
+      ``True`` if their code object has the :data:`CO_COROUTINE` flag.
 
    .. versionchanged:: 3.12
       Sync functions marked with :func:`markcoroutinefunction` now return
@@ -459,9 +492,13 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
       Functions wrapped in :func:`functools.partial` now return ``True`` if the
       wrapped function is an :term:`asynchronous generator` function.
 
+   .. versionchanged:: 3.10.6
+      :term:`Duck-typed <duck-typing>` function-like objects now return
+      ``True`` if their code object has the :data:`CO_ASYNC_GENERATOR` flag.
+
    .. versionchanged:: 3.13
       Functions wrapped in :func:`functools.partialmethod` now return ``True``
-      if the wrapped function is a :term:`coroutine function`.
+      if the wrapped function is a :term:`asynchronous generator` function.
 
 .. function:: isasyncgen(object)
 
@@ -513,8 +550,7 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 .. function:: ismethoddescriptor(object)
 
    Return ``True`` if the object is a method descriptor, but not if
-   :func:`ismethod`, :func:`isclass`, :func:`isfunction` or :func:`isbuiltin`
-   are true.
+   :func:`isclass`, :func:`ismethod` or :func:`isfunction` is true.
 
    This, for example, is true of ``int.__add__``.  An object passing this test
    has a :meth:`~object.__get__` method, but not a :meth:`~object.__set__`
@@ -522,10 +558,10 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
    attributes varies.  A :attr:`~definition.__name__` attribute is usually
    sensible, and :attr:`~definition.__doc__` often is.
 
-   Methods implemented via descriptors that also pass one of the other tests
-   return ``False`` from the :func:`ismethoddescriptor` test, simply because the
-   other tests promise more -- you can, e.g., count on having the
-   :attr:`~method.__func__` attribute (etc) when an object passes
+   Method descriptors that also pass any of the other tests (:func:`!isclass`,
+   :func:`!ismethod` or :func:`!isfunction`) make this function return ``False``,
+   simply because those other tests promise more -- you can, for example, count
+   on having the :attr:`~method.__func__` attribute when an object passes
    :func:`ismethod`.
 
    .. versionchanged:: 3.13
@@ -536,16 +572,28 @@ attributes (see :ref:`import-mod-attrs` for module attributes):
 
 .. function:: isdatadescriptor(object)
 
-   Return ``True`` if the object is a data descriptor.
+   Return ``True`` if the object is a data descriptor, but not if
+   :func:`isclass`, :func:`ismethod` or :func:`isfunction` is true.
 
-   Data descriptors have a :attr:`~object.__set__` or a :attr:`~object.__delete__` method.
-   Examples are properties (defined in Python), getsets, and members.  The
-   latter two are defined in C and there are more specific tests available for
-   those types, which is robust across Python implementations.  Typically, data
-   descriptors will also have :attr:`~definition.__name__` and :attr:`!__doc__` attributes
-   (properties, getsets, and members have both of these attributes), but this is
-   not guaranteed.
+   Data descriptors always have a :meth:`~object.__set__` method and/or
+   a :meth:`~object.__delete__` method.  Optionally, they may also have a
+   :meth:`~object.__get__` method.
 
+   Examples of data descriptors are :func:`properties <property>`, getsets and
+   member descriptors.  Note that for the latter two (defined only in C extension
+   modules), more specific tests are available: :func:`isgetsetdescriptor` and
+   :func:`ismemberdescriptor`, respectively.
+
+   While data descriptors may also have :attr:`~definition.__name__` and
+   :attr:`!__doc__` attributes (as properties, getsets and member descriptors
+   do), this is not necessarily the case in general.
+
+   .. versionchanged:: 3.8
+      This function now reports objects with only a :meth:`~object.__set__` method
+      as being data descriptors (the presence of :meth:`~object.__get__` is no
+      longer required for that).  Moreover, objects with :meth:`~object.__delete__`,
+      but not :meth:`~object.__set__`, are now properly recognized as data
+      descriptors as well, which was not the case previously.
 
 .. function:: isgetsetdescriptor(object)
 
@@ -598,6 +646,7 @@ Retrieving source code
 .. function:: getfile(object)
 
    Return the name of the (text or binary) file in which an object was defined.
+   An :exc:`OSError` is raised if the source code cannot be retrieved.
    This will fail with a :exc:`TypeError` if the object is a built-in module,
    class, or function.
 
@@ -611,9 +660,10 @@ Retrieving source code
 .. function:: getsourcefile(object)
 
    Return the name of the Python source file in which an object was defined
-   or ``None`` if no way can be identified to get the source.  This
-   will fail with a :exc:`TypeError` if the object is a built-in module, class, or
-   function.
+   or ``None`` if no way can be identified to get the source.  An :exc:`OSError` is
+   raised if the source code cannot be retrieved.
+   This will fail with a :exc:`TypeError` if the object is a built-in module,
+   class, or function.
 
 
 .. function:: getsourcelines(object)
@@ -1120,7 +1170,7 @@ Classes and functions
       :func:`signature` in Python 3.5, but that decision has been reversed
       in order to restore a clearly supported standard interface for
       single-source Python 2/3 code migrating away from the legacy
-      :func:`getargspec` API.
+      :func:`!getargspec` API.
 
    .. versionchanged:: 3.7
       Python only explicitly guaranteed that it preserved the declaration
@@ -1490,10 +1540,11 @@ properties, will be invoked and :meth:`~object.__getattr__` and
 may be called.
 
 For cases where you want passive introspection, like documentation tools, this
-can be inconvenient. :func:`getattr_static` has the same signature as :func:`getattr`
+can be inconvenient. :func:`getattr_static` has a similar signature as :func:`getattr`
 but avoids executing code when it fetches attributes.
 
-.. function:: getattr_static(obj, attr, default=None)
+.. function:: getattr_static(obj, attr)
+              getattr_static(obj, attr, default)
 
    Retrieve attributes without triggering dynamic lookup via the
    descriptor protocol, :meth:`~object.__getattr__`
@@ -1737,7 +1788,7 @@ Buffer flags
 
 .. _inspect-module-cli:
 
-Command Line Interface
+Command-line interface
 ----------------------
 
 The :mod:`inspect` module also provides a basic introspection capability

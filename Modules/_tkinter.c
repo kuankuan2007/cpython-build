@@ -33,6 +33,8 @@ Copyright (C) 1994 Steen Lumholt.
 #include "pycore_long.h"          // _PyLong_IsNegative()
 #include "pycore_sysmodule.h"     // _PySys_GetOptionalAttrString()
 
+#include <signal.h>               // SIGINT
+
 #ifdef MS_WINDOWS
 #  include <windows.h>
 #endif
@@ -151,18 +153,20 @@ _get_tcl_lib_path(void)
         }
 
         /* Check expected location for an installed Python first */
-        tcl_library_path = PyUnicode_FromString("\\tcl\\tcl" TCL_VERSION);
-        if (tcl_library_path == NULL) {
+        PyObject* tmp_tcl_library_path = PyUnicode_FromString("\\tcl\\tcl" TCL_VERSION);
+        if (tmp_tcl_library_path == NULL) {
             Py_DECREF(prefix);
             return NULL;
         }
-        tcl_library_path = PyUnicode_Concat(prefix, tcl_library_path);
+        tcl_library_path = PyUnicode_Concat(prefix, tmp_tcl_library_path);
+        Py_DECREF(tmp_tcl_library_path);
         Py_DECREF(prefix);
         if (tcl_library_path == NULL) {
             return NULL;
         }
         stat_return_value = _Py_stat(tcl_library_path, &stat_buf);
         if (stat_return_value == -2) {
+            Py_DECREF(tcl_library_path);
             return NULL;
         }
         if (stat_return_value == -1) {
@@ -177,16 +181,17 @@ _get_tcl_lib_path(void)
             }
             stat_return_value = _Py_stat(tcl_library_path, &stat_buf);
             if (stat_return_value == -2) {
+                Py_DECREF(tcl_library_path);
                 return NULL;
             }
             if (stat_return_value == -1) {
                 /* tcltkDir for a repository build doesn't exist either,
                    reset errno and leave Tcl to its own devices */
                 errno = 0;
-                tcl_library_path = NULL;
+                Py_CLEAR(tcl_library_path);
             }
 #else
-            tcl_library_path = NULL;
+            Py_CLEAR(tcl_library_path);
 #endif
         }
         already_checked = 1;
@@ -535,6 +540,30 @@ class _tkinter.tktimertoken "TkttObject *" "&Tktt_Type_spec"
 int Tcl_AppInit(Tcl_Interp *);
 #endif
 
+int
+Tkinter_TkInit(Tcl_Interp *interp)
+{
+#ifdef __APPLE__
+    /* Tk on macOS replaces the handlers of these signals with its own,
+       which exits the process.  Keep the handlers installed by Python
+       (gh-157672). */
+    static const int signals[] = {SIGINT, SIGHUP, SIGTERM};
+    PyOS_sighandler_t handlers[Py_ARRAY_LENGTH(signals)];
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(signals); i++) {
+        handlers[i] = PyOS_getsig(signals[i]);
+    }
+#endif
+    int result = Tk_Init(interp);
+#ifdef __APPLE__
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(signals); i++) {
+        if (handlers[i] != SIG_DFL) {
+            PyOS_setsig(signals[i], handlers[i]);
+        }
+    }
+#endif
+    return result;
+}
+
 #ifndef WITH_APPINIT
 int
 Tcl_AppInit(Tcl_Interp *interp)
@@ -553,7 +582,7 @@ Tcl_AppInit(Tcl_Interp *interp)
         return TCL_OK;
     }
 
-    if (Tk_Init(interp) == TCL_ERROR) {
+    if (Tkinter_TkInit(interp) == TCL_ERROR) {
         PySys_WriteStderr("Tk_Init error: %s\n", Tcl_GetStringResult(interp));
         return TCL_ERROR;
     }
@@ -586,8 +615,12 @@ Tkapp_New(const char *screenName, const char *className,
 
     v->interp = Tcl_CreateInterp();
     v->wantobjects = wantobjects;
+#if TCL_MAJOR_VERSION >= 9
+    v->threaded = 1;
+#else
     v->threaded = Tcl_GetVar2Ex(v->interp, "tcl_platform", "threaded",
                                 TCL_GLOBAL_ONLY) != NULL;
+#endif
     v->thread_id = Tcl_GetCurrentThread();
     v->dispatching = 0;
     v->trace = NULL;
@@ -714,11 +747,13 @@ Tkapp_New(const char *screenName, const char *className,
         if (!ret && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
             str_path = _get_tcl_lib_path();
             if (str_path == NULL && PyErr_Occurred()) {
+                Py_DECREF(v);
                 return NULL;
             }
             if (str_path != NULL) {
                 utf8_path = PyUnicode_AsUTF8String(str_path);
                 if (utf8_path == NULL) {
+                    Py_DECREF(v);
                     return NULL;
                 }
                 Tcl_SetVar(v->interp,
@@ -942,6 +977,40 @@ asBignumObj(PyObject *value)
     return result;
 }
 
+static Tcl_Obj* AsObj(PyObject *value);
+
+static Tcl_Obj*
+TupleAsObj(PyObject *value, int wrapped)
+{
+    Tcl_Obj *result = NULL;
+    Py_ssize_t size = PyTuple_GET_SIZE(value);
+    if (size == 0) {
+        return Tcl_NewListObj(0, NULL);
+    }
+    if (!CHECK_SIZE(size, sizeof(Tcl_Obj *))) {
+        PyErr_SetString(PyExc_OverflowError,
+                        wrapped ? "list is too long" : "tuple is too long");
+        return NULL;
+    }
+    Tcl_Obj **argv = (Tcl_Obj **)PyMem_Malloc(((size_t)size) * sizeof(Tcl_Obj *));
+    if (argv == NULL) {
+      PyErr_NoMemory();
+      return NULL;
+    }
+    for (Py_ssize_t i = 0; i < size; i++) {
+        Tcl_Obj *item = AsObj(PyTuple_GET_ITEM(value, i));
+        if (item == NULL) {
+            goto exit;
+        }
+        argv[i] = item;
+    }
+    result = Tcl_NewListObj((int)size, argv);
+
+exit:
+    PyMem_Free(argv);
+    return result;
+}
+
 static Tcl_Obj*
 AsObj(PyObject *value)
 {
@@ -988,28 +1057,17 @@ AsObj(PyObject *value)
     if (PyFloat_Check(value))
         return Tcl_NewDoubleObj(PyFloat_AS_DOUBLE(value));
 
-    if (PyTuple_Check(value) || PyList_Check(value)) {
-        Tcl_Obj **argv;
-        Py_ssize_t size, i;
+    if (PyTuple_Check(value)) {
+        return TupleAsObj(value, false);
+    }
 
-        size = PySequence_Fast_GET_SIZE(value);
-        if (size == 0)
-            return Tcl_NewListObj(0, NULL);
-        if (!CHECK_SIZE(size, sizeof(Tcl_Obj *))) {
-            PyErr_SetString(PyExc_OverflowError,
-                            PyTuple_Check(value) ? "tuple is too long" :
-                                                   "list is too long");
+    if (PyList_Check(value)) {
+        PyObject *value_as_tuple = PyList_AsTuple(value);
+        if (value_as_tuple == NULL) {
             return NULL;
         }
-        argv = (Tcl_Obj **) PyMem_Malloc(((size_t)size) * sizeof(Tcl_Obj *));
-        if (!argv) {
-          PyErr_NoMemory();
-          return NULL;
-        }
-        for (i = 0; i < size; i++)
-          argv[i] = AsObj(PySequence_Fast_GET_ITEM(value,i));
-        result = Tcl_NewListObj((int)size, argv);
-        PyMem_Free(argv);
+        result = TupleAsObj(value_as_tuple, true);
+        Py_DECREF(value_as_tuple);
         return result;
     }
 
@@ -2374,7 +2432,7 @@ PythonCmdDelete(ClientData clientData)
     PythonCmd_ClientData *data = (PythonCmd_ClientData *)clientData;
 
     ENTER_PYTHON
-    Py_XDECREF(data->self);
+    /* data->self is borrowed. */
     Py_XDECREF(data->func);
     PyMem_Free(data);
     LEAVE_PYTHON
@@ -2443,7 +2501,9 @@ _tkinter_tkapp_createcommand_impl(TkappObject *self, const char *name,
     data = PyMem_NEW(PythonCmd_ClientData, 1);
     if (!data)
         return PyErr_NoMemory();
-    Py_INCREF(self);
+    /* Borrow the interpreter: a strong reference would form an uncollectable
+       cycle (interp -> command -> data->self -> interp) and leak the command
+       (gh-80937).  The command cannot outlive the interpreter. */
     data->self = self;
     data->func = Py_NewRef(func);
     if (self->threaded && self->thread_id != Tcl_GetCurrentThread()) {
@@ -2474,6 +2534,7 @@ _tkinter_tkapp_createcommand_impl(TkappObject *self, const char *name,
     }
     if (err) {
         PyErr_SetString(Tkinter_TclError, "can't create Tcl command");
+        Py_DECREF(data->func);
         PyMem_Free(data);
         return NULL;
     }
@@ -2945,7 +3006,7 @@ _tkinter_tkapp_loadtk_impl(TkappObject *self)
         return NULL;
     }
     if (_tk_exists == NULL || strcmp(_tk_exists, "1") != 0)     {
-        if (Tk_Init(interp)             == TCL_ERROR) {
+        if (Tkinter_TkInit(interp)      == TCL_ERROR) {
             Tkinter_Error(self);
             return NULL;
         }
@@ -3029,10 +3090,25 @@ static void
 Tkapp_Dealloc(PyObject *self)
 {
     PyObject *tp = (PyObject *) Py_TYPE(self);
-    /*CHECK_TCL_APPARTMENT;*/
-    ENTER_TCL
-    Tcl_DeleteInterp(Tkapp_Interp(self));
-    LEAVE_TCL
+    if (((TkappObject *)self)->threaded &&
+        ((TkappObject *)self)->thread_id != Tcl_GetCurrentThread()) {
+        /* Deleting the interpreter from another thread aborts the process
+           ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+           Leak it instead (gh-83274). */
+        if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                         "the Tcl interpreter is leaked because it was "
+                         "deallocated in a thread other than the one it was "
+                         "created in (see gh-83274)", 1) < 0)
+        {
+            PyErr_FormatUnraisable("Exception ignored while finalizing "
+                                   "a Tcl interpreter");
+        }
+    }
+    else {
+        ENTER_TCL
+        Tcl_DeleteInterp(Tkapp_Interp(self));
+        LEAVE_TCL
+    }
     Py_XDECREF(((TkappObject *)self)->trace);
     PyObject_Free(self);
     Py_DECREF(tp);
@@ -3172,6 +3248,20 @@ _tkinter_create_impl(PyObject *module, const char *screenName,
     CHECK_STRING_LENGTH(className);
     CHECK_STRING_LENGTH(use);
 
+#if TCL_MAJOR_VERSION < 9
+    /* className is title-cased during Tk initialization.  Tcl 8.x does not
+     * support non-BMP characters (encoded as 4-byte UTF-8 sequences) there
+     * and crashes in Tcl_UtfToTitle (see gh-126219).  Reject them up front. */
+    for (const unsigned char *p = (const unsigned char *)className; *p; p++) {
+        if (*p >= 0xF0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "className must not contain non-BMP characters "
+                            "with this version of Tcl/Tk");
+            return NULL;
+        }
+    }
+#endif
+
     return (PyObject *) Tkapp_New(screenName, className,
                                   interactive, wantobjects, wantTk,
                                   sync, use);
@@ -3185,12 +3275,13 @@ _tkinter.setbusywaitinterval
 
 Set the busy-wait interval in milliseconds between successive calls to Tcl_DoOneEvent in a threaded Python interpreter.
 
-It should be set to a divisor of the maximum time between frames in an animation.
+It should be set to a divisor of the maximum time between frames in
+an animation.
 [clinic start generated code]*/
 
 static PyObject *
 _tkinter_setbusywaitinterval_impl(PyObject *module, int new_val)
-/*[clinic end generated code: output=42bf7757dc2d0ab6 input=deca1d6f9e6dae47]*/
+/*[clinic end generated code: output=42bf7757dc2d0ab6 input=984bbb86a3f916b7]*/
 {
     if (new_val < 0) {
         PyErr_SetString(PyExc_ValueError,
@@ -3303,14 +3394,20 @@ static PyMethodDef moduleMethods[] =
 };
 
 #ifdef WAIT_FOR_STDIN
+#ifndef MS_WINDOWS
 
 static int stdin_ready = 0;
 
-#ifndef MS_WINDOWS
 static void
 MyFileProc(void *clientData, int mask)
 {
+    int tfile = (int)(Py_intptr_t)clientData;
     stdin_ready = 1;
+    /* Stop watching stdin now that input is available.  Doing it here rather
+       than after the loop below ensures that a nested event loop (e.g. the one
+       started by wait_variable) does not keep waking up on the same unread
+       input, spinning at 100% CPU. */
+    Tcl_DeleteFileHandler(tfile);
 }
 #endif
 
@@ -3319,21 +3416,40 @@ static PyThreadState *event_tstate = NULL;
 static int
 EventHook(void)
 {
-#ifndef MS_WINDOWS
+#ifdef MS_WINDOWS
+    HANDLE hStdin;
+    DWORD type;
+#else
     int tfile;
+    stdin_ready = 0;
 #endif
     PyEval_RestoreThread(event_tstate);
-    stdin_ready = 0;
     errorInCmd = 0;
-#ifndef MS_WINDOWS
+#ifdef MS_WINDOWS
+    hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    type = GetFileType(hStdin);
+    while (1) {
+#else
     tfile = fileno(stdin);
-    Tcl_CreateFileHandler(tfile, TCL_READABLE, MyFileProc, NULL);
+    Tcl_CreateFileHandler(tfile, TCL_READABLE, MyFileProc,
+                          (void *)(Py_intptr_t)tfile);
+    while (!stdin_ready) {
 #endif
-    while (!errorInCmd && !stdin_ready) {
         int result;
 #ifdef MS_WINDOWS
-        if (_kbhit()) {
-            stdin_ready = 1;
+        if (type == FILE_TYPE_CHAR) {
+            if (_kbhit()) break;
+        }
+        else if (type == FILE_TYPE_PIPE) {
+            DWORD available;
+            if (PeekNamedPipe(hStdin, NULL, 0, NULL, &available, NULL)) {
+                if (available > 0) break;
+            }
+            else {
+                if (GetLastError() == ERROR_BROKEN_PIPE) break;
+            }
+        }
+        else if (type == FILE_TYPE_DISK) {
             break;
         }
 #endif
@@ -3349,18 +3465,23 @@ EventHook(void)
             Sleep(Tkinter_busywaitinterval);
         Py_END_ALLOW_THREADS
 
+        /* Report an exception raised in a callback, but keep pumping events
+           instead of returning to the prompt: without readline there is no
+           input waiting on stdin yet, so returning here would block in fgets
+           until the user hits enter, freezing later callbacks. */
+        if (errorInCmd) {
+            errorInCmd = 0;
+            PyErr_SetRaisedException(excInCmd);
+            excInCmd = NULL;
+            PyErr_Print();
+        }
         if (result < 0)
             break;
     }
 #ifndef MS_WINDOWS
-    Tcl_DeleteFileHandler(tfile);
+    if (!stdin_ready)
+        Tcl_DeleteFileHandler(tfile);
 #endif
-    if (errorInCmd) {
-        errorInCmd = 0;
-        PyErr_SetRaisedException(excInCmd);
-        excInCmd = NULL;
-        PyErr_Print();
-    }
     PyEval_SaveThread();
     return 0;
 }
@@ -3408,7 +3529,7 @@ PyInit__tkinter(void)
 
     tcl_lock = PyThread_allocate_lock();
     if (tcl_lock == NULL)
-        return NULL;
+        return PyErr_NoMemory();
 
     m = PyModule_Create(&_tkintermodule);
     if (m == NULL)

@@ -7,6 +7,7 @@
 #include "pycore_pylifecycle.h"   // _PyErr_Print()
 #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
 #include "pycore_pystats.h"       // _Py_PrintSpecializationStats()
+#include "pycore_pythread.h"      // PyThread_hang_thread()
 
 /*
    Notes about the implementation:
@@ -245,11 +246,16 @@ drop_gil(PyInterpreterState *interp, PyThreadState *tstate, int final_release)
         Py_FatalError("drop_gil: GIL is not locked");
     }
 
+    int drop_requested = 0;
     if (!final_release) {
         /* Sub-interpreter support: threads might have been switched
            under our feet using PyThreadState_Swap(). Fix the GIL last
            holder variable so that our heuristics work. */
         _Py_atomic_store_ptr_relaxed(&gil->last_holder, tstate);
+
+        /* Checked here as tstate may freed outside gil. */
+        drop_requested = _Py_eval_breaker_bit_is_set(tstate,
+                                                     _PY_GIL_DROP_REQUEST_BIT);
     }
 
     drop_gil_impl(tstate, gil);
@@ -261,8 +267,7 @@ drop_gil(PyInterpreterState *interp, PyThreadState *tstate, int final_release)
        crash.  We can use final_release to indicate the thread is done with the
        GIL, and that's the only time we might delete the interpreter.  See
        https://github.com/python/cpython/issues/104341. */
-    if (!final_release &&
-        _Py_eval_breaker_bit_is_set(tstate, _PY_GIL_DROP_REQUEST_BIT)) {
+    if (!final_release && drop_requested) {
         MUTEX_LOCK(gil->switch_mutex);
         /* Not switched yet => wait */
         if (((PyThreadState*)_Py_atomic_load_ptr_relaxed(&gil->last_holder)) == tstate)
@@ -284,10 +289,9 @@ drop_gil(PyInterpreterState *interp, PyThreadState *tstate, int final_release)
 /* Take the GIL.
 
    The function saves errno at entry and restores its value at exit.
+   It may hang rather than return if the interpreter has been finalized.
 
-   tstate must be non-NULL.
-
-   Returns 1 if the GIL was acquired, or 0 if not. */
+   tstate must be non-NULL. */
 static void
 take_gil(PyThreadState *tstate)
 {
@@ -300,12 +304,18 @@ take_gil(PyThreadState *tstate)
 
     if (_PyThreadState_MustExit(tstate)) {
         /* bpo-39877: If Py_Finalize() has been called and tstate is not the
-           thread which called Py_Finalize(), exit immediately the thread.
+           thread which called Py_Finalize(), this thread cannot continue.
 
            This code path can be reached by a daemon thread after Py_Finalize()
            completes. In this case, tstate is a dangling pointer: points to
-           PyThreadState freed memory. */
-        PyThread_exit_thread();
+           PyThreadState freed memory.
+
+           This used to call a *thread_exit API, but that was not safe as it
+           lacks stack unwinding and local variable destruction important to
+           C++. gh-87135: The best that can be done is to hang the thread as
+           the public APIs calling this have no error reporting mechanism (!).
+         */
+        PyThread_hang_thread();
     }
 
     assert(_PyThreadState_CheckConsistency(tstate));
@@ -349,7 +359,9 @@ take_gil(PyThreadState *tstate)
                 if (drop_requested) {
                     _Py_unset_eval_breaker_bit(holder_tstate, _PY_GIL_DROP_REQUEST_BIT);
                 }
-                PyThread_exit_thread();
+                // gh-87135: hang the thread as *thread_exit() is not a safe
+                // API. It lacks stack unwind and local variable destruction.
+                PyThread_hang_thread();
             }
             assert(_PyThreadState_CheckConsistency(tstate));
 
@@ -390,7 +402,7 @@ take_gil(PyThreadState *tstate)
 
     if (_PyThreadState_MustExit(tstate)) {
         /* bpo-36475: If Py_Finalize() has been called and tstate is not
-           the thread which called Py_Finalize(), exit immediately the
+           the thread which called Py_Finalize(), gh-87135: hang the
            thread.
 
            This code path can be reached by a daemon thread which was waiting
@@ -400,7 +412,7 @@ take_gil(PyThreadState *tstate)
         /* tstate could be a dangling pointer, so don't pass it to
            drop_gil(). */
         drop_gil(interp, NULL, 1);
-        PyThread_exit_thread();
+        PyThread_hang_thread();
     }
     assert(_PyThreadState_CheckConsistency(tstate));
 

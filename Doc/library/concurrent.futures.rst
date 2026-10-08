@@ -19,6 +19,11 @@ The asynchronous execution can be performed with threads, using
 :class:`ProcessPoolExecutor`.  Both implement the same interface, which is
 defined by the abstract :class:`Executor` class.
 
+:class:`concurrent.futures.Future` must not be confused with
+:class:`asyncio.Future`, which is designed for use with :mod:`asyncio`
+tasks and coroutines. See the :doc:`asyncio's Future <asyncio-future>`
+documentation for a detailed comparison of the two.
+
 .. include:: ../includes/wasm-notavail.rst
 
 Executor Objects
@@ -92,10 +97,10 @@ Executor Objects
       executor has started running will be completed prior to this method
       returning. The remaining futures are cancelled.
 
-      You can avoid having to call this method explicitly if you use the
-      :keyword:`with` statement, which will shutdown the :class:`Executor`
-      (waiting as if :meth:`Executor.shutdown` were called with *wait* set to
-      ``True``)::
+      You can avoid having to call this method explicitly if you use the executor
+      as a :term:`context manager` via the  :keyword:`with` statement, which
+      will shutdown the :class:`Executor` (waiting as if :meth:`Executor.shutdown`
+      were called with *wait* set to ``True``)::
 
          import shutil
          with ThreadPoolExecutor(max_workers=4) as e:
@@ -142,7 +147,9 @@ And::
        print(f.result())
 
    executor = ThreadPoolExecutor(max_workers=1)
-   executor.submit(wait_on_future)
+   future = executor.submit(wait_on_future)
+   # Note: calling future.result() would also cause a deadlock because
+   # the single worker thread is already waiting for wait_on_future().
 
 
 .. class:: ThreadPoolExecutor(max_workers=None, thread_name_prefix='', initializer=None, initargs=())
@@ -314,6 +321,11 @@ in a REPL or a lambda should not be expected to work.
    .. versionchanged:: 3.13
       *max_workers* uses :func:`os.process_cpu_count` by default, instead of
       :func:`os.cpu_count`.
+
+   .. versionchanged:: 3.13.15
+      Fixed a deadlock (:gh:`115634`) where the executor could hang after
+      a worker process exited upon reaching its *max_tasks_per_child*
+      limit while tasks remained queued.
 
 .. _processpoolexecutor-example:
 

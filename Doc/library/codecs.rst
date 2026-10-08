@@ -978,17 +978,22 @@ defined in Unicode. A simple and straightforward way that can store each Unicode
 code point, is to store each code point as four consecutive bytes. There are two
 possibilities: store the bytes in big endian or in little endian order. These
 two encodings are called ``UTF-32-BE`` and ``UTF-32-LE`` respectively. Their
-disadvantage is that if e.g. you use ``UTF-32-BE`` on a little endian machine you
-will always have to swap bytes on encoding and decoding. ``UTF-32`` avoids this
-problem: bytes will always be in natural endianness. When these bytes are read
-by a CPU with a different endianness, then bytes have to be swapped though. To
-be able to detect the endianness of a ``UTF-16`` or ``UTF-32`` byte sequence,
-there's the so called BOM ("Byte Order Mark"). This is the Unicode character
-``U+FEFF``. This character can be prepended to every ``UTF-16`` or ``UTF-32``
-byte sequence. The byte swapped version of this character (``0xFFFE``) is an
-illegal character that may not appear in a Unicode text. So when the
-first character in a ``UTF-16`` or ``UTF-32`` byte sequence
-appears to be a ``U+FFFE`` the bytes have to be swapped on decoding.
+disadvantage is that if, for example, you use ``UTF-32-BE`` on a little endian
+machine you will always have to swap bytes on encoding and decoding.
+Python's ``UTF-16`` and ``UTF-32`` codecs avoid this problem by using the
+platform's native byte order when no BOM is present.
+Python follows prevailing platform
+practice, so native-endian data round-trips without redundant byte swapping,
+even though the Unicode Standard defaults to big-endian when the byte order is
+unspecified. When these bytes are read by a CPU with a different endianness,
+the bytes have to be swapped. To be able to detect the endianness of a
+``UTF-16`` or ``UTF-32`` byte sequence, a BOM ("Byte Order Mark") is used.
+This is the Unicode character ``U+FEFF``. This character can be prepended to every
+``UTF-16`` or ``UTF-32`` byte sequence. The byte swapped version of this character
+(``0xFFFE``) is an illegal character that may not appear in a Unicode text.
+When the first character of a ``UTF-16`` or ``UTF-32`` byte sequence is
+``U+FFFE``, the bytes have to be swapped on decoding.
+
 Unfortunately the character ``U+FEFF`` had a second purpose as
 a ``ZERO WIDTH NO-BREAK SPACE``: a character that has no width and doesn't allow
 a word to be split. It can e.g. be used to give hints to a ligature algorithm.
@@ -1139,7 +1144,7 @@ particular, the following variants typically exist:
 +-----------------+--------------------------------+--------------------------------+
 | cp857           | 857, IBM857                    | Turkish                        |
 +-----------------+--------------------------------+--------------------------------+
-| cp858           | 858, IBM858                    | Western Europe                 |
+| cp858           | 858, IBM00858                  | Western Europe                 |
 +-----------------+--------------------------------+--------------------------------+
 | cp860           | 860, IBM860                    | Portuguese                     |
 +-----------------+--------------------------------+--------------------------------+
@@ -1176,7 +1181,7 @@ particular, the following variants typically exist:
 |                 |                                |                                |
 |                 |                                | .. versionadded:: 3.4          |
 +-----------------+--------------------------------+--------------------------------+
-| cp1140          | ibm1140                        | Western Europe                 |
+| cp1140          | IBM01140                       | Western Europe                 |
 +-----------------+--------------------------------+--------------------------------+
 | cp1250          | windows-1250                   | Central and Eastern Europe     |
 +-----------------+--------------------------------+--------------------------------+
@@ -1364,6 +1369,15 @@ encodings.
 |                    |         | :mod:`encodings.idna`.    |
 |                    |         | Only ``errors='strict'``  |
 |                    |         | is supported.             |
+|                    |         |                           |
+|                    |         | .. warning::              |
+|                    |         |                           |
+|                    |         |    This codec builds on   |
+|                    |         |    ``punycode``, whose    |
+|                    |         |    algorithms scale       |
+|                    |         |    poorly, so limit the   |
+|                    |         |    length of untrusted    |
+|                    |         |    input.                 |
 +--------------------+---------+---------------------------+
 | mbcs               | ansi,   | Windows only: Encode the  |
 |                    | dbcs    | operand according to the  |
@@ -1380,6 +1394,14 @@ encodings.
 | punycode           |         | Implement :rfc:`3492`.    |
 |                    |         | Stateful codecs are not   |
 |                    |         | supported.                |
+|                    |         |                           |
+|                    |         | .. warning::              |
+|                    |         |                           |
+|                    |         |    The decoding and       |
+|                    |         |    encoding algorithms    |
+|                    |         |    scale poorly, so       |
+|                    |         |    limit the length of    |
+|                    |         |    untrusted input.       |
 +--------------------+---------+---------------------------+
 | raw_unicode_escape |         | Latin-1 encoding with     |
 |                    |         | :samp:`\\u{XXXX}` and     |
@@ -1587,6 +1609,11 @@ This module implements :rfc:`3490` (Internationalized Domain Names in
 Applications) and :rfc:`3492` (Nameprep: A Stringprep Profile for
 Internationalized Domain Names (IDN)). It builds upon the ``punycode`` encoding
 and :mod:`stringprep`.
+
+.. warning::
+
+   This module builds on ``punycode``, whose algorithms scale poorly, so limit
+   the length of untrusted input.
 
 If you need the IDNA 2008 standard from :rfc:`5891` and :rfc:`5895`, use the
 third-party :pypi:`idna` module.

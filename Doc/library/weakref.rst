@@ -125,6 +125,9 @@ See :ref:`__slots__ documentation <slots>` for details.
 
    This is a subclassable type rather than a factory function.
 
+   Weak references are :ref:`generic <generics>` over the type of the object they
+   reference.
+
    .. attribute:: __callback__
 
       This read-only attribute returns the callback currently associated to the
@@ -283,9 +286,10 @@ same issues as the :meth:`WeakKeyDictionary.keyrefs` method.
    from an object's :meth:`~object.__del__` method or a weak reference's
    callback.
 
-   When the program exits, each remaining live finalizer is called
-   unless its :attr:`atexit` attribute has been set to false.  They
-   are called in reverse order of creation.
+   When the program exits (or more generally, at :term:`interpreter shutdown`),
+   each remaining live finalizer is called unless its :attr:`atexit` attribute
+   has been set to false.
+   They are called in reverse order of creation.
 
    A finalizer will never invoke its callback during the later part of
    the :term:`interpreter shutdown` when module globals are liable to have
@@ -314,9 +318,9 @@ same issues as the :meth:`WeakKeyDictionary.keyrefs` method.
 
    .. attribute:: atexit
 
-      A writable boolean property which by default is true.  When the
-      program exits, it calls all remaining live finalizers for which
-      :attr:`.atexit` is true.  They are called in reverse order of
+      A writable boolean property which by default is true.  At
+      :term:`interpreter shutdown`, all remaining live finalizers for which
+      :attr:`.atexit` is true are called in reverse order of
       creation.
 
    .. note::
@@ -329,17 +333,17 @@ same issues as the :meth:`WeakKeyDictionary.keyrefs` method.
    .. versionadded:: 3.4
 
 
-.. data:: ReferenceType
+.. class:: ReferenceType
 
    The type object for weak references objects.
 
 
-.. data:: ProxyType
+.. class:: ProxyType
 
    The type object for proxies of objects which are not callable.
 
 
-.. data:: CallableProxyType
+.. class:: CallableProxyType
 
    The type object for proxies of callable objects.
 

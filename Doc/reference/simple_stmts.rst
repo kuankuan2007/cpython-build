@@ -182,7 +182,7 @@ Assignment of an object to a single target is recursively defined as follows.
      inst.x = inst.x + 1   # writes inst.x as 4 leaving Cls.x as 3
 
   This description does not necessarily apply to descriptor attributes, such as
-  properties created with :func:`property`.
+  properties created with :deco:`property`.
 
   .. index::
      pair: subscription; assignment
@@ -463,8 +463,8 @@ Deletion of a target list recursively deletes each target, from left to right.
 
 Deletion of a name removes the binding of that name from the local or global
 namespace, depending on whether the name occurs in a :keyword:`global` statement
-in the same code block.  If the name is unbound, a :exc:`NameError` exception
-will be raised.
+in the same code block.  Trying to delete an unbound name raises a
+:exc:`NameError` exception.
 
 .. index:: pair: attribute; deletion
 
@@ -763,8 +763,9 @@ The basic import statement (no :keyword:`from` clause) is executed in two
 steps:
 
 #. find a module, loading and initializing it if necessary
-#. define a name or names in the local namespace for the scope where
-   the :keyword:`import` statement occurs.
+#. define a name or names in the current namespace for the scope where
+   the :keyword:`import` statement occurs, just as an assignment statement
+   would (including :keyword:`global` and :keyword:`nonlocal` semantics).
 
 When the statement contains multiple clauses (separated by
 commas) the two steps are carried out separately for each clause, just
@@ -809,7 +810,7 @@ The :keyword:`from` form uses a slightly more complex process:
    #. if not, attempt to import a submodule with that name and then
       check the imported module again for that attribute
    #. if the attribute is not found, :exc:`ImportError` is raised.
-   #. otherwise, a reference to that value is stored in the local namespace,
+   #. otherwise, a reference to that value is stored in the current namespace,
       using the name in the :keyword:`!as` clause if it is present,
       otherwise using the attribute name
 
@@ -829,9 +830,14 @@ where the :keyword:`import` statement occurs.
 
 .. index:: single: __all__ (optional module attribute)
 
+.. attribute:: module.__all__
+   :no-typesetting:
+
 The *public names* defined by a module are determined by checking the module's
 namespace for a variable named ``__all__``; if defined, it must be a sequence
-of strings which are names defined or imported by that module.  The names
+of strings which are names defined or imported by that module.
+Names containing non-ASCII characters must be in the `normalization form`_
+NFKC.  The names
 given in ``__all__`` are all considered public and are required to exist.  If
 ``__all__`` is not defined, the set of public names includes all names found
 in the module's namespace which do not begin with an underscore character
@@ -864,6 +870,8 @@ the :ref:`relativeimports` section.
 determine dynamically the modules to be loaded.
 
 .. audit-event:: import module,filename,sys.path,sys.meta_path,sys.path_hooks import
+
+.. _normalization form: https://www.unicode.org/reports/tr15/#Norm_Forms
 
 .. _future:
 
@@ -969,9 +977,16 @@ as globals. It would be impossible to assign to a global variable without
 :keyword:`!global`, although free variables may refer to globals without being
 declared global.
 
-The :keyword:`global` statement applies to the entire scope of a function or
-class body. A :exc:`SyntaxError` is raised if a variable is used or
+The :keyword:`!global` statement applies to the entire current scope
+(module, function body or class definition).
+A :exc:`SyntaxError` is raised if a variable is used or
 assigned to prior to its global declaration in the scope.
+
+At the module level, all variables are global, so a :keyword:`!global`
+statement has no effect.
+However, variables must still not be used or
+assigned to prior to their :keyword:`!global` declaration.
+This requirement is relaxed in the interactive prompt (:term:`REPL`).
 
 .. index::
    pair: built-in function; exec

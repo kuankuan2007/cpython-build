@@ -718,6 +718,7 @@ hamt_node_bitmap_assoc(PyHamtNode_Bitmap *self,
 
             PyHamtNode_Bitmap *ret = hamt_node_bitmap_clone(self);
             if (ret == NULL) {
+                Py_DECREF(sub_node);
                 return NULL;
             }
             Py_SETREF(ret->b_array[val_idx], (PyObject*)sub_node);
@@ -1010,6 +1011,7 @@ hamt_node_bitmap_without(PyHamtNode_Bitmap *self,
 
                 PyHamtNode_Bitmap *clone = hamt_node_bitmap_clone(self);
                 if (clone == NULL) {
+                    Py_DECREF(sub_node);
                     return W_ERROR;
                 }
 
@@ -2368,6 +2370,10 @@ _PyHamt_Eq(PyHamtObject *v, PyHamtObject *w)
         return 0;
     }
 
+    Py_INCREF(v);
+    Py_INCREF(w);
+
+    int res = 1;
     PyHamtIteratorState iter;
     hamt_iter_t iter_res;
     hamt_find_t find_res;
@@ -2383,25 +2389,38 @@ _PyHamt_Eq(PyHamtObject *v, PyHamtObject *w)
             find_res = hamt_find(w, v_key, &w_val);
             switch (find_res) {
                 case F_ERROR:
-                    return -1;
+                    res = -1;
+                    goto done;
 
                 case F_NOT_FOUND:
-                    return 0;
+                    res = 0;
+                    goto done;
 
                 case F_FOUND: {
+                    Py_INCREF(v_key);
+                    Py_INCREF(v_val);
+                    Py_INCREF(w_val);
                     int cmp = PyObject_RichCompareBool(v_val, w_val, Py_EQ);
+                    Py_DECREF(v_key);
+                    Py_DECREF(v_val);
+                    Py_DECREF(w_val);
                     if (cmp < 0) {
-                        return -1;
+                        res = -1;
+                        goto done;
                     }
                     if (cmp == 0) {
-                        return 0;
+                        res = 0;
+                        goto done;
                     }
                 }
             }
         }
     } while (iter_res != I_END);
 
-    return 1;
+done:
+    Py_DECREF(v);
+    Py_DECREF(w);
+    return res;
 }
 
 Py_ssize_t
@@ -2468,6 +2487,10 @@ static int
 hamt_baseiter_tp_clear(PyHamtIterator *it)
 {
     Py_CLEAR(it->hi_obj);
+    /* i_nodes holds borrowed pointers into the tree that hi_obj was keeping
+       alive, so the cursor must not be used again.  A negative i_level makes
+       hamt_iterator_next() report I_END without touching i_nodes. */
+    it->hi_iter.i_level = -1;
     return 0;
 }
 
@@ -2511,6 +2534,10 @@ hamt_baseiter_tp_iternext(PyHamtIterator *it)
 static Py_ssize_t
 hamt_baseiter_tp_len(PyHamtIterator *it)
 {
+    if (it->hi_obj == NULL) {
+        /* tp_clear() ran on this iterator. */
+        return 0;
+    }
     return it->hi_obj->h_count;
 }
 
@@ -2531,6 +2558,7 @@ hamt_baseiter_new(PyTypeObject *type, binaryfunc yield, PyHamtObject *o)
 
     hamt_iterator_init(&it->hi_iter, o->h_root);
 
+    PyObject_GC_Track(it);
     return (PyObject*)it;
 }
 
