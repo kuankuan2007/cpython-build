@@ -1,6 +1,6 @@
-set PYTHON=J:\cpython\venv\Scripts\python.exe
+set PYTHON=J:\cpython\venv-14\Scripts\python.exe
 
-set SPHINXBUILD=J:\cpython\venv\Scripts\sphinx-build.exe
+set SPHINXBUILD=J:\cpython\venv-14\Scripts\sphinx-build.exe
 set SCRIPT_DIR=%~dp0
 set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
 
@@ -11,3 +11,4 @@ for %%i in ("%NOW_WORKING_DOC_DIR%") do set NOW_WORKING_DIR=%%~dpi
 
 set HTMLHELP=%NOW_WORKING_DIR%externals\windows-installer\htmlhelp\hhc.exe
 set PATH=%NOW_WORKING_DIR%externals\windows-installer\htmlhelp;%PATH%
+set MSBUILD="c:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
