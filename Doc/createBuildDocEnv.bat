@@ -1,8 +1,8 @@
 
 set PYTHON=J:\cpython\venv-15\Scripts\python.exe
 
-set SPHINXBUILD=J:\cpython\venv-14\Scripts\sphinx-build.exe
-set MSBUILD="c:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+set SPHINXBUILD=J:\cpython\venv-15\Scripts\sphinx-build.exe
+set MSBUILD="c:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"
 set SCRIPT_DIR=%~dp0
 set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
 
