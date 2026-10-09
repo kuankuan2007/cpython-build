@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import linecache
+import logging
 import os
 import importlib
 import inspect
@@ -241,6 +242,85 @@ class FilterTests(BaseTest):
                                     42)
             self.assertEqual(len(w), 0)
 
+    def test_filter_module(self):
+        MS_WINDOWS = (sys.platform == 'win32')
+        with self.module.catch_warnings(record=True) as w:
+            self.module.simplefilter('error')
+            self.module.filterwarnings('always', module=r'package\.module\z')
+            self.module.warn_explicit('msg', UserWarning, 'filename', 42,
+                                      module='package.module')
+            self.assertEqual(len(w), 1)
+            with self.assertRaises(UserWarning):
+                self.module.warn_explicit('msg', UserWarning, '/path/to/package/module', 42)
+            with self.assertRaises(UserWarning):
+                self.module.warn_explicit('msg', UserWarning, '/path/to/package/module.py', 42)
+
+        with self.module.catch_warnings(record=True) as w:
+            self.module.simplefilter('error')
+            self.module.filterwarnings('always', module='package')
+            self.module.warn_explicit('msg', UserWarning, 'filename', 42,
+                                      module='package.module')
+            self.assertEqual(len(w), 1)
+            with self.assertRaises(UserWarning):
+                self.module.warn_explicit('msg', UserWarning, 'filename', 42,
+                                          module='other.package.module')
+            with self.assertRaises(UserWarning):
+                self.module.warn_explicit('msg', UserWarning, '/path/to/otherpackage/module.py', 42)
+
+        with self.module.catch_warnings(record=True) as w:
+            self.module.simplefilter('error')
+            self.module.filterwarnings('always', module=r'/path/to/package/module\z')
+            self.module.warn_explicit('msg', UserWarning, '/path/to/package/module', 42)
+            self.assertEqual(len(w), 1)
+            self.module.warn_explicit('msg', UserWarning, '/path/to/package/module.py', 42)
+            self.assertEqual(len(w), 2)
+            with self.assertRaises(UserWarning):
+                self.module.warn_explicit('msg', UserWarning, '/PATH/TO/PACKAGE/MODULE', 42)
+            if MS_WINDOWS:
+                if self.module is py_warnings:
+                    self.module.warn_explicit('msg', UserWarning, r'/path/to/package/module.PY', 42)
+                    self.assertEqual(len(w), 3)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'/path/to/package/module/__init__.py', 42)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'/path/to/package/module.pyw', 42)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'\path\to\package\module', 42)
+
+        with self.module.catch_warnings(record=True) as w:
+            self.module.simplefilter('error')
+            self.module.filterwarnings('always', module=r'/path/to/package/__init__\z')
+            self.module.warn_explicit('msg', UserWarning, '/path/to/package/__init__.py', 42)
+            self.assertEqual(len(w), 1)
+            self.module.warn_explicit('msg', UserWarning, '/path/to/package/__init__', 42)
+            self.assertEqual(len(w), 2)
+
+        if MS_WINDOWS:
+            with self.module.catch_warnings(record=True) as w:
+                self.module.simplefilter('error')
+                self.module.filterwarnings('always', module=r'C:\\path\\to\\package\\module\z')
+                self.module.warn_explicit('msg', UserWarning, r'C:\path\to\package\module', 42)
+                self.assertEqual(len(w), 1)
+                self.module.warn_explicit('msg', UserWarning, r'C:\path\to\package\module.py', 42)
+                self.assertEqual(len(w), 2)
+                if self.module is py_warnings:
+                    self.module.warn_explicit('msg', UserWarning, r'C:\path\to\package\module.PY', 42)
+                    self.assertEqual(len(w), 3)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'C:\path\to\package\module.pyw', 42)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'C:\PATH\TO\PACKAGE\MODULE', 42)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'C:/path/to/package/module', 42)
+                with self.assertRaises(UserWarning):
+                    self.module.warn_explicit('msg', UserWarning, r'C:\path\to\package\module\__init__.py', 42)
+
+        with self.module.catch_warnings(record=True) as w:
+            self.module.simplefilter('error')
+            self.module.filterwarnings('always', module=r'<unknown>\z')
+            self.module.warn_explicit('msg', UserWarning, '', 42)
+            self.assertEqual(len(w), 1)
+
     def test_module_globals(self):
         with self.module.catch_warnings(record=True) as w:
             self.module.simplefilter("always", UserWarning)
@@ -418,6 +498,47 @@ class FilterTests(BaseTest):
                                       self.module.warn, FutureWarning("msg"))
                     stderr = stderr.getvalue()
                     self.assertIn(error_msg, stderr)
+
+    def test_catchwarnings_with_showwarning(self):
+        # gh-146358: catch_warnings must override warnings.showwarning()
+        # if it's not the default implementation.
+
+        warns = []
+        def custom_showwarning(message, category, filename, lineno,
+                               file=None, line=None):
+            warns.append(message)
+
+        with self.module.catch_warnings():
+            self.module.resetwarnings()
+
+            with support.swap_attr(self.module, 'showwarning',
+                                   custom_showwarning):
+                with self.module.catch_warnings(record=True) as recorded:
+                    self.module.warn("recorded")
+                self.assertEqual(len(recorded), 1)
+                self.assertEqual(str(recorded[0].message), 'recorded')
+                self.assertIs(self.module.showwarning, custom_showwarning)
+
+                self.module.warn("custom")
+
+        self.assertEqual(len(warns), 1)
+        self.assertEqual(str(warns[0]), "custom")
+
+    def test_catchwarnings_logging(self):
+        # gh-146358: catch_warnings(record=True) must replace the
+        # showwarning() function set by logging.captureWarnings(True).
+
+        with self.module.catch_warnings():
+            self.module.resetwarnings()
+            logging.captureWarnings(True)
+
+            with self.module.catch_warnings(record=True) as recorded:
+                self.module.warn("recorded")
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(str(recorded[0].message), 'recorded')
+
+            logging.captureWarnings(False)
+
 
 class CFilterTests(FilterTests, unittest.TestCase):
     module = c_warnings
@@ -1480,6 +1601,37 @@ class _DeprecatedTest(BaseTest, unittest.TestCase):
                                             _version=version)
 
 
+class WarnExplicitSourceTests(BaseTest):
+    # gh-155319: the source line is taken from the loader of the module
+    # whose globals are passed as module_globals, if the file which name
+    # is passed as filename cannot be read.
+
+    def warn_explicit(self, lineno):
+        with support.captured_stderr() as stderr:
+            with self.module.catch_warnings():
+                self.module.simplefilter("always")
+                self.module.warn_explicit(
+                    'eggs', UserWarning, 'nonexistent', lineno,
+                    module_globals=warning_tests.__dict__)
+        return stderr.getvalue()
+
+    def test_source_line(self):
+        source = warning_tests.__loader__.get_source(warning_tests.__name__)
+        expected = source.splitlines()[0].strip()
+        self.assertEqual(self.warn_explicit(1),
+                         f'nonexistent:1: UserWarning: eggs\n  {expected}\n')
+
+    def test_source_line_out_of_range(self):
+        self.assertEqual(self.warn_explicit(1000),
+                         'nonexistent:1000: UserWarning: eggs\n')
+
+class CWarnExplicitSourceTests(WarnExplicitSourceTests, unittest.TestCase):
+    module = c_warnings
+
+class PyWarnExplicitSourceTests(WarnExplicitSourceTests, unittest.TestCase):
+    module = py_warnings
+
+
 class BootstrapTest(unittest.TestCase):
 
     def test_issue_8766(self):
@@ -1492,6 +1644,59 @@ class BootstrapTest(unittest.TestCase):
 
             # Use -W to load warnings module at startup
             assert_python_ok('-c', 'pass', '-W', 'always', PYTHONPATH=cwd)
+
+
+class WarnExplicitMainTests(BaseTest):
+    # gh-123011: warn_explicit() with module globals of the __main__ module,
+    # no matter how it is executed.
+    code = ('import warnings\n'
+            'warnings.warn_explicit("eggs", UserWarning, "bar", 1,\n'
+            '                       module_globals=globals())\n')
+
+    def prepare_code(self):
+        """Make the subprocess use the tested implementation."""
+        if self.module is py_warnings:
+            return ("import sys\n"
+                    "sys.modules['_warnings'] = None\n") + self.code
+        return self.code
+
+    def check(self, err):
+        lines = err.decode().splitlines()
+        # Only the Python implementation adds the source line.
+        if len(lines) > 1 and lines[1].startswith('  '):
+            del lines[1]
+        self.assertEqual(lines, ['bar:1: UserWarning: eggs'])
+
+    def make_script(self, dirname):
+        filename = os.path.join(dirname, 'spam.py')
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(self.prepare_code())
+        return filename
+
+    def test_script(self):
+        # __main__ has __spec__ set to None.
+        with os_helper.temp_dir() as dirname:
+            filename = self.make_script(dirname)
+            rc, out, err = assert_python_ok(filename)
+            self.check(err)
+
+    def test_module(self):
+        # __main__ has __spec__ of the module executed with -m.
+        with os_helper.temp_dir() as dirname:
+            self.make_script(dirname)
+            rc, out, err = assert_python_ok('-m', 'spam', PYTHONPATH=dirname)
+            self.check(err)
+
+    def test_command(self):
+        # __main__ has the built-in importer as a loader.
+        rc, out, err = assert_python_ok('-c', self.prepare_code())
+        self.check(err)
+
+class CWarnExplicitMainTests(WarnExplicitMainTests, unittest.TestCase):
+    module = c_warnings
+
+class PyWarnExplicitMainTests(WarnExplicitMainTests, unittest.TestCase):
+    module = py_warnings
 
 
 class FinalizationTest(unittest.TestCase):
@@ -1868,6 +2073,25 @@ class DeprecatedTests(PyPublicAPITests):
                 pass
 
         self.assertEqual(D.inited, 3)
+
+    def test_existing_init_subclass_in_sibling_base(self):
+        @deprecated("A will go away soon")
+        class A:
+            pass
+        class B:
+            def __init_subclass__(cls, x):
+                super().__init_subclass__()
+                cls.inited = x
+
+        with self.assertWarnsRegex(DeprecationWarning, "A will go away soon"):
+            class C(A, B, x=42):
+                pass
+        self.assertEqual(C.inited, 42)
+
+        with self.assertWarnsRegex(DeprecationWarning, "A will go away soon"):
+            class D(B, A, x=42):
+                pass
+        self.assertEqual(D.inited, 42)
 
     def test_init_subclass_has_correct_cls(self):
         init_subclass_saw = None

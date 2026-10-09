@@ -50,8 +50,8 @@ additional methods of invocation:
 * When called with ``-c command``, it executes the Python statement(s) given as
   *command*.  Here *command* may contain multiple statements separated by
   newlines. Leading whitespace is significant in Python statements!
-* When called with ``-m module-name``, the given module is located on the
-  Python module path and executed as a script.
+* When called with ``-m module-name``, the given module is located using the standard
+  import mechanism and executed as a script.
 
 In non-interactive mode, the entire input is parsed before it is executed.
 
@@ -78,8 +78,8 @@ source.
 
 .. option:: -m <module-name>
 
-   Search :data:`sys.path` for the named module and execute its contents as
-   the :mod:`__main__` module.
+   Locate the module using the standard import mechanism and execute its contents
+   as the :mod:`__main__` module.
 
    Since the argument is a *module* name, you must not give a file extension
    (``.py``).  The module name should be a valid absolute Python module name, but
@@ -369,8 +369,8 @@ Miscellaneous options
 .. option:: -R
 
    Turn on hash randomization. This option only has an effect if the
-   :envvar:`PYTHONHASHSEED` environment variable is set to ``0``, since hash
-   randomization is enabled by default.
+   :envvar:`PYTHONHASHSEED` environment variable is set to anything other
+   than ``random``, since hash randomization is enabled by default.
 
    On previous versions of Python, this option turns on hash randomization,
    so that the :meth:`~object.__hash__` values of str and bytes objects
@@ -381,7 +381,7 @@ Miscellaneous options
    Hash randomization is intended to provide protection against a
    denial-of-service caused by carefully chosen inputs that exploit the worst
    case performance of a dict construction, *O*\ (*n*\ :sup:`2`) complexity.  See
-   http://ocert.org/advisories/ocert-2011-003.html for details.
+   https://ocert.org/advisories/ocert-2011-003.html for details.
 
    :envvar:`PYTHONHASHSEED` allows you to set a fixed value for the hash
    seed secret.
@@ -501,7 +501,25 @@ Miscellaneous options
 .. option:: -x
 
    Skip the first line of the source, allowing use of non-Unix forms of
-   ``#!cmd``.  This is intended for a DOS specific hack only.
+   ``#!cmd``.
+
+   This can be used to turn a Python script into a Windows batch file.
+   Similarly to adding a shebang line and setting the executable bit on Unix,
+   the extension of the Python script can be changed to ``.bat`` and the
+   following line can be added at the start of the script:
+
+   .. code-block:: batch
+
+      @py -x "%~f0" %* & exit /b
+
+   Or, to specify the path to the Python interpreter explicitly:
+
+   .. code-block:: batch
+
+      @"C:\Path\to\python.exe" -x "%~f0" %* & exit /b
+
+   Unlike a shebang line which is a Python comment, this line is not valid
+   Python syntax, and the :option:`-x` option is needed to skip it.
 
 
 .. option:: -X
@@ -1045,6 +1063,13 @@ conflict.
    * ``pymalloc_debug``: same as ``pymalloc`` but also install debug hooks.
    * ``mimalloc_debug``: same as ``mimalloc`` but also install debug hooks.
 
+   .. note::
+
+      In the :term:`free-threaded <free threading>` build, the ``malloc``,
+      ``malloc_debug``, ``pymalloc``, and ``pymalloc_debug`` values are not
+      supported.  Only ``default``, ``debug``, ``mimalloc``, and
+      ``mimalloc_debug`` are accepted.
+
    .. versionadded:: 3.6
 
    .. versionchanged:: 3.7
@@ -1054,12 +1079,13 @@ conflict.
 .. envvar:: PYTHONMALLOCSTATS
 
    If set to a non-empty string, Python will print statistics of the
-   :ref:`pymalloc memory allocator <pymalloc>` every time a new pymalloc object
-   arena is created, and on shutdown.
+   :ref:`pymalloc memory allocator <pymalloc>` or the
+   :ref:`mimalloc memory allocator <mimalloc>` (whichever is in use)
+   every time a new object arena is created, and on shutdown.
 
    This variable is ignored if the :envvar:`PYTHONMALLOC` environment variable
    is used to force the :c:func:`malloc` allocator of the C library, or if
-   Python is configured without ``pymalloc`` support.
+   Python is configured without both ``pymalloc`` and ``mimalloc`` support.
 
    .. versionchanged:: 3.6
       This variable can now also be used on Python compiled in release mode.
@@ -1256,9 +1282,8 @@ conflict.
 .. envvar:: PYTHON_BASIC_REPL
 
    If this variable is set to any value, the interpreter will not attempt to
-   load the Python-based :term:`REPL` that requires :mod:`curses` and
-   :mod:`readline`, and will instead use the traditional parser-based
-   :term:`REPL`.
+   load the Python-based :term:`REPL` that requires :mod:`readline`, and will
+   instead use the traditional parser-based :term:`REPL`.
 
    .. versionadded:: 3.13
 

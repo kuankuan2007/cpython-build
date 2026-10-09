@@ -211,7 +211,7 @@ _lzma
     Homepage:
         https://tukaani.org/xz/
 _ssl
-    Python wrapper for version 3.0.15 of the OpenSSL secure sockets
+    Python wrapper for version 3.5 of the OpenSSL secure sockets
     library, which is downloaded from our binaries repository at
     https://github.com/python/cpython-bin-deps.
 
@@ -234,7 +234,7 @@ _sqlite3
     Homepage:
         https://www.sqlite.org/
 _tkinter
-    Wraps version 8.6.15 of the Tk windowing system, which is downloaded
+    Wraps version 9.0.4 of the Tk windowing system, which is downloaded
     from our binaries repository at
     https://github.com/python/cpython-bin-deps.
 

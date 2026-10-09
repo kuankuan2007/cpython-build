@@ -1260,7 +1260,12 @@ class FileHandler(StreamHandler):
         """
         if self.stream is None:
             if self.mode != 'w' or not self._closed:
-                self.stream = self._open()
+                # Report an error while opening the file, like emit errors.
+                try:
+                    self.stream = self._open()
+                except Exception:
+                    self.handleError(record)
+                    return
         if self.stream:
             StreamHandler.emit(self, record)
 
@@ -1694,7 +1699,11 @@ class Logger(Filterer):
         """
         with _lock:
             if hdlr in self.handlers:
-                self.handlers.remove(hdlr)
+                # Replace the list instead of mutating it in place, so that
+                # callHandlers() can iterate it without a lock (gh-79366).
+                handlers = self.handlers.copy()
+                handlers.remove(hdlr)
+                self.handlers = handlers
 
     def hasHandlers(self):
         """
@@ -1852,9 +1861,9 @@ class LoggerAdapter(object):
 
     def __init__(self, logger, extra=None, merge_extra=False):
         """
-        Initialize the adapter with a logger and a dict-like object which
-        provides contextual information. This constructor signature allows
-        easy stacking of LoggerAdapters, if so desired.
+        Initialize the adapter with a logger and an optional dict-like object
+        which provides contextual information. This constructor signature
+        allows easy stacking of LoggerAdapters, if so desired.
 
         You can effectively pass keyword arguments as shown in the
         following example:
@@ -1885,8 +1894,9 @@ class LoggerAdapter(object):
         Normally, you'll only need to override this one method in a
         LoggerAdapter subclass for your specific needs.
         """
-        if self.merge_extra and "extra" in kwargs:
-            kwargs["extra"] = {**self.extra, **kwargs["extra"]}
+        if self.merge_extra and kwargs.get("extra") is not None:
+            if self.extra is not None:
+                kwargs["extra"] = {**self.extra, **kwargs["extra"]}
         else:
             kwargs["extra"] = self.extra
         return msg, kwargs

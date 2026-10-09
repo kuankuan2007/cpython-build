@@ -97,7 +97,7 @@ def py_scanstring(s, end, strict=True,
             if strict:
                 #msg = "Invalid control character %r at" % (terminator,)
                 msg = "Invalid control character {0!r} at".format(terminator)
-                raise JSONDecodeError(msg, s, end)
+                raise JSONDecodeError(msg, s, end - 1)
             else:
                 _append(terminator)
                 continue
@@ -297,10 +297,10 @@ class JSONDecoder(object):
         place of the given ``dict``.  This can be used to provide custom
         deserializations (e.g. to support JSON-RPC class hinting).
 
-        ``object_pairs_hook``, if specified will be called with the result of
-        every JSON object decoded with an ordered list of pairs.  The return
-        value of ``object_pairs_hook`` will be used instead of the ``dict``.
-        This feature can be used to implement custom decoders.
+        ``object_pairs_hook``, if specified will be called with the result
+        of every JSON object decoded with an ordered list of pairs.  The
+        return value of ``object_pairs_hook`` will be used instead of the
+        ``dict``.  This feature can be used to implement custom decoders.
         If ``object_hook`` is also defined, the ``object_pairs_hook`` takes
         priority.
 

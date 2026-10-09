@@ -116,7 +116,14 @@ _PyOptimizer_Optimize(
     _PyExecutorObject **executor_ptr, int chain_depth)
 {
     _PyStackRef *stack_pointer = frame->stackpointer;
-    assert(_PyInterpreterState_GET()->jit);
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (!interp->jit) {
+        // gh-140936: It is possible that interp->jit will become false during
+        // interpreter finalization. However, the specialized JUMP_BACKWARD_JIT
+        // instruction may still be present. In this case, we should
+        // return immediately without optimization.
+        return 0;
+    }
     // The first executor in a chain and the MAX_CHAIN_DEPTH'th executor *must*
     // make progress in order to avoid infinite loops or excessively-long
     // side-exit chains. We can only insert the executor into the bytecode if
@@ -1206,6 +1213,10 @@ make_executor_from_uops(_PyUOpInstruction *buffer, int length, const _PyBloomFil
     assert(next_exit == -1);
     assert(dest == executor->trace);
     assert(dest->opcode == _START_EXECUTOR);
+    // Note: we MUST track it here before any Py_DECREF(executor) or
+    // linking of executor. Otherwise, the GC tries to untrack a
+    // still untracked object during dealloc.
+    _PyObject_GC_TRACK(executor);
     _Py_ExecutorInit(executor, dependencies);
 #ifdef Py_DEBUG
     char *python_lltrace = Py_GETENV("PYTHON_LLTRACE");
@@ -1235,7 +1246,6 @@ make_executor_from_uops(_PyUOpInstruction *buffer, int length, const _PyBloomFil
         return NULL;
     }
 #endif
-    _PyObject_GC_TRACK(executor);
     return executor;
 }
 

@@ -298,7 +298,7 @@ partial_new(PyTypeObject *type, PyObject *args, PyObject *kw)
         if (kw == NULL) {
             pto->kw = PyDict_New();
         }
-        else if (Py_REFCNT(kw) == 1) {
+        else if (_PyObject_IsUniquelyReferenced(kw)) {
             pto->kw = Py_NewRef(kw);
         }
         else {
@@ -375,7 +375,9 @@ partial_vectorcall_fallback(PyThreadState *tstate, partialobject *pto,
                             PyObject *const *args, size_t nargsf,
                             PyObject *kwnames)
 {
+#ifndef Py_GIL_DISABLED
     pto->vectorcall = NULL;
+#endif
     Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
     return _PyObject_MakeTpCall(tstate, (PyObject *)pto, args, nargs, kwnames);
 }
@@ -609,65 +611,79 @@ partial_repr(PyObject *self)
 {
     partialobject *pto = partialobject_CAST(self);
     PyObject *result = NULL;
-    PyObject *arglist;
-    PyObject *mod;
-    PyObject *name;
+    PyObject *arglist = NULL;
+    PyObject *mod = NULL;
+    PyObject *name = NULL;
     Py_ssize_t i, n;
     PyObject *key, *value;
     int status;
 
     status = Py_ReprEnter(self);
     if (status != 0) {
-        if (status < 0)
+        if (status < 0) {
             return NULL;
+        }
         return PyUnicode_FromString("...");
     }
+    /* Reference arguments in case they change */
+    PyObject *fn = Py_NewRef(pto->fn);
+    PyObject *args = Py_NewRef(pto->args);
+    PyObject *kw = Py_NewRef(pto->kw);
+    assert(PyTuple_Check(args));
+    assert(PyDict_Check(kw));
 
     arglist = Py_GetConstant(Py_CONSTANT_EMPTY_STR);
-    if (arglist == NULL)
+    if (arglist == NULL) {
         goto done;
+    }
     /* Pack positional arguments */
-    assert(PyTuple_Check(pto->args));
-    n = PyTuple_GET_SIZE(pto->args);
+    n = PyTuple_GET_SIZE(args);
     for (i = 0; i < n; i++) {
         Py_SETREF(arglist, PyUnicode_FromFormat("%U, %R", arglist,
-                                        PyTuple_GET_ITEM(pto->args, i)));
-        if (arglist == NULL)
+                                        PyTuple_GET_ITEM(args, i)));
+        if (arglist == NULL) {
             goto done;
+        }
     }
     /* Pack keyword arguments */
-    assert (PyDict_Check(pto->kw));
-    for (i = 0; PyDict_Next(pto->kw, &i, &key, &value);) {
+    int error = 0;
+    Py_BEGIN_CRITICAL_SECTION(kw);
+    for (i = 0; PyDict_Next(kw, &i, &key, &value);) {
         /* Prevent key.__str__ from deleting the value. */
         Py_INCREF(value);
         Py_SETREF(arglist, PyUnicode_FromFormat("%U, %S=%R", arglist,
                                                 key, value));
         Py_DECREF(value);
-        if (arglist == NULL)
-            goto done;
+        if (arglist == NULL) {
+            error = 1;
+            break;
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    if (error) {
+        goto done;
     }
 
     mod = PyType_GetModuleName(Py_TYPE(pto));
     if (mod == NULL) {
-        goto error;
+        goto done;
     }
+
     name = PyType_GetQualName(Py_TYPE(pto));
     if (name == NULL) {
-        Py_DECREF(mod);
-        goto error;
+        goto done;
     }
-    result = PyUnicode_FromFormat("%S.%S(%R%U)", mod, name, pto->fn, arglist);
-    Py_DECREF(mod);
-    Py_DECREF(name);
-    Py_DECREF(arglist);
 
- done:
+    result = PyUnicode_FromFormat("%S.%S(%R%U)", mod, name, fn, arglist);
+done:
+    Py_XDECREF(name);
+    Py_XDECREF(mod);
+    Py_XDECREF(arglist);
+    Py_DECREF(fn);
+    Py_DECREF(args);
+    Py_DECREF(kw);
     Py_ReprLeave(self);
     return result;
- error:
-    Py_DECREF(arglist);
-    Py_ReprLeave(self);
-    return NULL;
 }
 
 /* Pickle strategy:
@@ -699,7 +715,8 @@ partial_setstate(PyObject *self, PyObject *state)
     if (!PyArg_ParseTuple(state, "OOOO", &fn, &fnargs, &kw, &dict) ||
         !PyCallable_Check(fn) ||
         !PyTuple_Check(fnargs) ||
-        (kw != Py_None && !PyDict_Check(kw)))
+        (kw != Py_None && !PyDict_Check(kw)) ||
+        (dict != Py_None && !PyDict_Check(dict)))
     {
         PyErr_SetString(PyExc_TypeError, "invalid partial state");
         return NULL;
@@ -754,7 +771,8 @@ static PyMethodDef partial_methods[] = {
     {"__reduce__", partial_reduce, METH_NOARGS},
     {"__setstate__", partial_setstate, METH_O},
     {"__class_getitem__",    Py_GenericAlias,
-    METH_O|METH_CLASS,       PyDoc_STR("See PEP 585")},
+    METH_O|METH_CLASS,
+    PyDoc_STR("partial is generic over the wrapped function's return type")},
     {NULL,              NULL}           /* sentinel */
 };
 
@@ -962,9 +980,9 @@ _functools.reduce
 
 Apply a function of two arguments cumulatively to the items of an iterable, from left to right.
 
-This effectively reduces the iterable to a single value.  If initial is present,
-it is placed before the items of the iterable in the calculation, and serves as
-a default when the iterable is empty.
+This effectively reduces the iterable to a single value.  If initial is
+present, it is placed before the items of the iterable in the
+calculation, and serves as a default when the iterable is empty.
 
 For example, reduce(lambda x, y: x+y, [1, 2, 3, 4, 5])
 calculates ((((1 + 2) + 3) + 4) + 5).
@@ -973,7 +991,7 @@ calculates ((((1 + 2) + 3) + 4) + 5).
 static PyObject *
 _functools_reduce_impl(PyObject *module, PyObject *func, PyObject *seq,
                        PyObject *result)
-/*[clinic end generated code: output=30d898fe1267c79d input=1511e9a8c38581ac]*/
+/*[clinic end generated code: output=30d898fe1267c79d input=1e2c850f5229ff2a]*/
 {
     PyObject *args, *it;
 
@@ -995,7 +1013,7 @@ _functools_reduce_impl(PyObject *module, PyObject *func, PyObject *seq,
     for (;;) {
         PyObject *op2;
 
-        if (Py_REFCNT(args) > 1) {
+        if (!_PyObject_IsUniquelyReferenced(args)) {
             Py_DECREF(args);
             if ((args = PyTuple_New(2)) == NULL)
                 goto Fail;

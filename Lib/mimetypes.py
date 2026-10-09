@@ -244,7 +244,7 @@ class MimeTypes:
         list of standard types, else to the list of non-standard
         types.
         """
-        with open(filename, encoding='utf-8') as fp:
+        with open(filename, encoding='utf-8', errors='surrogateescape') as fp:
             self.readfp(fp, strict)
 
     def readfp(self, fp, strict=True):
@@ -435,7 +435,7 @@ def init(files=None):
 
 def read_mime_types(file):
     try:
-        f = open(file, encoding='utf-8')
+        f = open(file, encoding='utf-8', errors='surrogateescape')
     except OSError:
         return None
     with f:
@@ -718,24 +718,30 @@ def _parse_args(args):
 
 def _main(args=None):
     """Run the mimetypes command-line interface and return a text to print."""
-    import sys
-
     args, help_text = _parse_args(args)
 
+    results = []
     if args.extension:
         for gtype in args.type:
             guess = guess_extension(gtype, not args.lenient)
             if guess:
-                return str(guess)
-            sys.exit(f"error: unknown type {gtype}")
+                results.append(str(guess))
+            else:
+                results.append(f"error: unknown type {gtype}")
+        return results
     else:
         for gtype in args.type:
             guess, encoding = guess_type(gtype, not args.lenient)
             if guess:
-                return f"type: {guess} encoding: {encoding}"
-            sys.exit(f"error: media type unknown for {gtype}")
-    return help_text
+                results.append(f"type: {guess} encoding: {encoding}")
+            else:
+                results.append(f"error: media type unknown for {gtype}")
+        return results
 
 
 if __name__ == '__main__':
-    print(_main())
+    import sys
+
+    results = _main()
+    print("\n".join(results))
+    sys.exit(any(result.startswith("error: ") for result in results))

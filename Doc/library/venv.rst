@@ -78,7 +78,7 @@ It also creates a :file:`bin` (or :file:`Scripts` on Windows) subdirectory
 containing a copy or symlink of the Python executable
 (as appropriate for the platform or arguments used at environment creation time).
 It also creates a :file:`lib/pythonX.Y/site-packages` subdirectory
-(on Windows, this is :file:`Lib\site-packages`).
+(on Windows, this is :file:`Lib\\site-packages`).
 If an existing directory is specified, it will be re-used.
 
 .. versionchanged:: 3.5
@@ -545,7 +545,7 @@ subclass which installs setuptools and pip into a created virtual environment::
     from subprocess import Popen, PIPE
     import sys
     from threading import Thread
-    from urllib.parse import urlparse
+    from urllib.parse import urlsplit
     from urllib.request import urlretrieve
     import venv
 
@@ -616,7 +616,7 @@ subclass which installs setuptools and pip into a created virtual environment::
             stream.close()
 
         def install_script(self, context, name, url):
-            _, _, path, _, _, _ = urlparse(url)
+            _, _, path, _, _ = urlsplit(url)
             fn = os.path.split(path)[-1]
             binpath = context.bin_path
             distpath = os.path.join(binpath, fn)

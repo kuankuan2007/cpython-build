@@ -745,6 +745,10 @@ _PyCode_New(struct _PyCodeConstructor *con)
         return NULL;
     }
 
+#ifdef Py_GIL_DISABLED
+    co->_co_unique_id = _Py_INVALID_UNIQUE_ID;
+#endif
+
     if (init_code(co, con) < 0) {
         Py_DECREF(co);
         return NULL;
@@ -1019,10 +1023,31 @@ PyCode_Addr2Line(PyCodeObject *co, int addrq)
     if (addrq < 0) {
         return co->co_firstlineno;
     }
-    if (co->_co_monitoring && co->_co_monitoring->lines) {
-        return _Py_Instrumentation_GetLine(co, addrq/sizeof(_Py_CODEUNIT));
+    _PyCoMonitoringData *data = _Py_atomic_load_ptr_acquire(&co->_co_monitoring);
+    if (data) {
+        _PyCoLineInstrumentationData *lines = _Py_atomic_load_ptr_acquire(&data->lines);
+        if (lines) {
+            return _Py_Instrumentation_GetLine(co, lines, addrq/sizeof(_Py_CODEUNIT));
+        }
     }
     assert(addrq >= 0 && addrq < _PyCode_NBYTES(co));
+    PyCodeAddressRange bounds;
+    _PyCode_InitAddressRange(co, &bounds);
+    return _PyCode_CheckLineNumber(addrq, &bounds);
+}
+
+int
+_PyCode_SafeAddr2Line(PyCodeObject *co, int addrq)
+{
+    if (addrq < 0) {
+        return co->co_firstlineno;
+    }
+    if (co->_co_monitoring && co->_co_monitoring->lines) {
+        return _Py_Instrumentation_GetLine(co, co->_co_monitoring->lines, addrq/sizeof(_Py_CODEUNIT));
+    }
+    if (!(addrq >= 0 && addrq < _PyCode_NBYTES(co))) {
+        return -1;
+    }
     PyCodeAddressRange bounds;
     _PyCode_InitAddressRange(co, &bounds);
     return _PyCode_CheckLineNumber(addrq, &bounds);
@@ -1555,6 +1580,67 @@ typedef struct {
 } _PyCodeObjectExtra;
 
 
+static inline size_t
+code_extra_size(Py_ssize_t n)
+{
+    return sizeof(_PyCodeObjectExtra) + (n - 1) * sizeof(void *);
+}
+
+#ifdef Py_GIL_DISABLED
+static int
+code_extra_grow_ft(PyCodeObject *co, _PyCodeObjectExtra *old_co_extra,
+                   Py_ssize_t old_ce_size, Py_ssize_t new_ce_size,
+                   Py_ssize_t index, void *extra)
+{
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(co);
+    _PyCodeObjectExtra *new_co_extra = PyMem_Malloc(
+        code_extra_size(new_ce_size));
+    if (new_co_extra == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    if (old_ce_size > 0) {
+        memcpy(new_co_extra->ce_extras, old_co_extra->ce_extras,
+               old_ce_size * sizeof(void *));
+    }
+    for (Py_ssize_t i = old_ce_size; i < new_ce_size; i++) {
+        new_co_extra->ce_extras[i] = NULL;
+    }
+    new_co_extra->ce_size = new_ce_size;
+    new_co_extra->ce_extras[index] = extra;
+
+    // Publish new buffer and its contents to lock-free readers.
+    FT_ATOMIC_STORE_PTR_RELEASE(co->co_extra, new_co_extra);
+    if (old_co_extra != NULL) {
+        // QSBR: defer old-buffer free until lock-free readers quiesce.
+        _PyMem_FreeDelayed(old_co_extra, code_extra_size(old_ce_size));
+    }
+    return 0;
+}
+#else
+static int
+code_extra_grow_gil(PyCodeObject *co, _PyCodeObjectExtra *old_co_extra,
+                    Py_ssize_t old_ce_size, Py_ssize_t new_ce_size,
+                    Py_ssize_t index, void *extra)
+{
+    _PyCodeObjectExtra *new_co_extra = PyMem_Realloc(
+        old_co_extra, code_extra_size(new_ce_size));
+    if (new_co_extra == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    for (Py_ssize_t i = old_ce_size; i < new_ce_size; i++) {
+        new_co_extra->ce_extras[i] = NULL;
+    }
+    new_co_extra->ce_size = new_ce_size;
+    new_co_extra->ce_extras[index] = extra;
+    co->co_extra = new_co_extra;
+    return 0;
+}
+#endif
+
 int
 PyUnstable_Code_GetExtra(PyObject *code, Py_ssize_t index, void **extra)
 {
@@ -1563,15 +1649,19 @@ PyUnstable_Code_GetExtra(PyObject *code, Py_ssize_t index, void **extra)
         return -1;
     }
 
-    PyCodeObject *o = (PyCodeObject*) code;
-    _PyCodeObjectExtra *co_extra = (_PyCodeObjectExtra*) o->co_extra;
+    PyCodeObject *co = (PyCodeObject *)code;
+    *extra = NULL;
 
-    if (co_extra == NULL || index < 0 || co_extra->ce_size <= index) {
-        *extra = NULL;
+    if (index < 0) {
         return 0;
     }
 
-    *extra = co_extra->ce_extras[index];
+    // Lock-free read; pairs with release stores in SetExtra.
+    _PyCodeObjectExtra *co_extra = FT_ATOMIC_LOAD_PTR_ACQUIRE(co->co_extra);
+    if (co_extra != NULL && index < co_extra->ce_size) {
+        *extra = FT_ATOMIC_LOAD_PTR_ACQUIRE(co_extra->ce_extras[index]);
+    }
+
     return 0;
 }
 
@@ -1581,40 +1671,59 @@ PyUnstable_Code_SetExtra(PyObject *code, Py_ssize_t index, void *extra)
 {
     PyInterpreterState *interp = _PyInterpreterState_GET();
 
-    if (!PyCode_Check(code) || index < 0 ||
-            index >= interp->co_extra_user_count) {
+    // co_extra_user_count is monotonically increasing and published with
+    // release store in RequestCodeExtraIndex, so once an index is valid
+    // it stays valid.
+    Py_ssize_t user_count = FT_ATOMIC_LOAD_SSIZE_ACQUIRE(
+        interp->co_extra_user_count);
+
+    if (!PyCode_Check(code) || index < 0 || index >= user_count) {
         PyErr_BadInternalCall();
         return -1;
     }
 
-    PyCodeObject *o = (PyCodeObject*) code;
-    _PyCodeObjectExtra *co_extra = (_PyCodeObjectExtra *) o->co_extra;
+    PyCodeObject *co = (PyCodeObject *)code;
+    int result = 0;
+    void *old_slot_value = NULL;
 
-    if (co_extra == NULL || co_extra->ce_size <= index) {
-        Py_ssize_t i = (co_extra == NULL ? 0 : co_extra->ce_size);
-        co_extra = PyMem_Realloc(
-                co_extra,
-                sizeof(_PyCodeObjectExtra) +
-                (interp->co_extra_user_count-1) * sizeof(void*));
-        if (co_extra == NULL) {
-            return -1;
-        }
-        for (; i < interp->co_extra_user_count; i++) {
-            co_extra->ce_extras[i] = NULL;
-        }
-        co_extra->ce_size = interp->co_extra_user_count;
-        o->co_extra = co_extra;
+    Py_BEGIN_CRITICAL_SECTION(co);
+
+    _PyCodeObjectExtra *old_co_extra = (_PyCodeObjectExtra *)co->co_extra;
+    Py_ssize_t old_ce_size = (old_co_extra == NULL)
+        ? 0 : old_co_extra->ce_size;
+
+    // Fast path: slot already exists, update in place.
+    if (index < old_ce_size) {
+        old_slot_value = old_co_extra->ce_extras[index];
+        FT_ATOMIC_STORE_PTR_RELEASE(old_co_extra->ce_extras[index], extra);
+        goto done;
     }
 
-    if (co_extra->ce_extras[index] != NULL) {
-        freefunc free = interp->co_extra_freefuncs[index];
-        if (free != NULL) {
-            free(co_extra->ce_extras[index]);
+    // Slow path: buffer needs to grow.
+    Py_ssize_t new_ce_size = user_count;
+#ifdef Py_GIL_DISABLED
+    // FT build: allocate new buffer and swap; QSBR reclaims the old one.
+    result = code_extra_grow_ft(
+        co, old_co_extra, old_ce_size, new_ce_size, index, extra);
+#else
+    // GIL build: grow with realloc.
+    result = code_extra_grow_gil(
+        co, old_co_extra, old_ce_size, new_ce_size, index, extra);
+#endif
+
+done:;
+    Py_END_CRITICAL_SECTION();
+    if (old_slot_value != NULL) {
+        // Free the old slot value if a free function was registered.
+        // The caller must ensure no other thread can still access the old
+        // value after this overwrite.
+        freefunc free_extra = interp->co_extra_freefuncs[index];
+        if (free_extra != NULL) {
+            free_extra(old_slot_value);
         }
     }
 
-    co_extra->ce_extras[index] = extra;
-    return 0;
+    return result;
 }
 
 
@@ -2440,15 +2549,17 @@ code_dealloc(PyObject *self)
     FT_CLEAR_WEAKREFS(self, co->co_weakreflist);
     free_monitoring_data(co->_co_monitoring);
 #ifdef Py_GIL_DISABLED
-    // The first element always points to the mutable bytecode at the end of
-    // the code object, which will be freed when the code object is freed.
-    for (Py_ssize_t i = 1; i < co->co_tlbc->size; i++) {
-        char *entry = co->co_tlbc->entries[i];
-        if (entry != NULL) {
-            PyMem_Free(entry);
+    if (co->co_tlbc != NULL) {
+        // The first element always points to the mutable bytecode at the end of
+        // the code object, which will be freed when the code object is freed.
+        for (Py_ssize_t i = 1; i < co->co_tlbc->size; i++) {
+            char *entry = co->co_tlbc->entries[i];
+            if (entry != NULL) {
+                PyMem_Free(entry);
+            }
         }
+        PyMem_Free(co->co_tlbc);
     }
-    PyMem_Free(co->co_tlbc);
 #endif
     PyObject_Free(co);
 }
@@ -2843,12 +2954,13 @@ code._varname_from_oparg
 
 (internal-only) Return the local variable name for the given oparg.
 
-WARNING: this method is for internal use only and may change or go away.
+WARNING: this method is for internal use only and may change or go
+away.
 [clinic start generated code]*/
 
 static PyObject *
 code__varname_from_oparg_impl(PyCodeObject *self, int oparg)
-/*[clinic end generated code: output=1fd1130413184206 input=c5fa3ee9bac7d4ca]*/
+/*[clinic end generated code: output=1fd1130413184206 input=6ba7d6df0d566463]*/
 {
     PyObject *name = PyTuple_GetItem(self->co_localsplusnames, oparg);
     if (name == NULL) {

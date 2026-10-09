@@ -11,6 +11,7 @@
 #include "pycore_code.h"             // _PyCode_New()
 #include "pycore_hashtable.h"        // _Py_hashtable_t
 #include "pycore_long.h"             // _PyLong_IsZero()
+#include "pycore_object.h"           // _PyObject_IsUniquelyReferenced
 #include "pycore_pystate.h"          // _PyInterpreterState_GET()
 #include "pycore_setobject.h"        // _PySet_NextEntryRef()
 #include "pycore_unicodeobject.h"    // _PyUnicode_InternImmortal()
@@ -309,7 +310,7 @@ w_PyLong(const PyLongObject *ob, char flag, WFILE *p)
     }
     if (!long_export.digits) {
         int8_t sign = long_export.value < 0 ? -1 : 1;
-        uint64_t abs_value = Py_ABS(long_export.value);
+        uint64_t abs_value = _Py_ABS_CAST(uint64_t, long_export.value);
         uint64_t d = abs_value;
         long l = 0;
 
@@ -379,7 +380,6 @@ static int
 w_ref(PyObject *v, char *flag, WFILE *p)
 {
     _Py_hashtable_entry_t *entry;
-    int w;
 
     if (p->version < 3 || p->hashtable == NULL)
         return 0; /* not writing object references */
@@ -388,7 +388,7 @@ w_ref(PyObject *v, char *flag, WFILE *p)
      * But we use TYPE_REF always for interned string, to PYC file stable
      * as possible.
      */
-    if (Py_REFCNT(v) == 1 &&
+    if (_PyObject_IsUniquelyReferenced(v) &&
             !(PyUnicode_CheckExact(v) && PyUnicode_CHECK_INTERNED(v))) {
         return 0;
     }
@@ -396,20 +396,28 @@ w_ref(PyObject *v, char *flag, WFILE *p)
     entry = _Py_hashtable_get_entry(p->hashtable, v);
     if (entry != NULL) {
         /* write the reference index to the stream */
-        w = (int)(uintptr_t)entry->value;
+        uintptr_t w = (uintptr_t)entry->value;
+        if (w & 0x80000000LU) {
+            PyErr_Format(PyExc_ValueError, "cannot marshal recursion %T objects", v);
+            goto err;
+        }
         /* we don't store "long" indices in the dict */
-        assert(0 <= w && w <= 0x7fffffff);
+        assert(w <= 0x7fffffff);
         w_byte(TYPE_REF, p);
-        w_long(w, p);
+        w_long((int)w, p);
         return 1;
     } else {
-        size_t s = p->hashtable->nentries;
+        size_t w = p->hashtable->nentries;
         /* we don't support long indices */
-        if (s >= 0x7fffffff) {
+        if (w >= 0x7fffffff) {
             PyErr_SetString(PyExc_ValueError, "too many objects");
             goto err;
         }
-        w = (int)s;
+        // Corresponding code should call w_complete() after
+        // writing the object.
+        if (PyCode_Check(v) || PySlice_Check(v)) {
+            w |= 0x80000000LU;
+        }
         if (_Py_hashtable_set(p->hashtable, Py_NewRef(v),
                               (void *)(uintptr_t)w) < 0) {
             Py_DECREF(v);
@@ -424,12 +432,37 @@ err:
 }
 
 static void
+w_complete(PyObject *v, WFILE *p)
+{
+    if (p->version < 3 || p->hashtable == NULL) {
+        return;
+    }
+    if (_PyObject_IsUniquelyReferenced(v)) {
+        return;
+    }
+
+    _Py_hashtable_entry_t *entry = _Py_hashtable_get_entry(p->hashtable, v);
+    if (entry == NULL) {
+        return;
+    }
+    assert(entry != NULL);
+    uintptr_t w = (uintptr_t)entry->value;
+    assert(w & 0x80000000LU);
+    w &= ~0x80000000LU;
+    entry->value = (void *)(uintptr_t)w;
+}
+
+static void
 w_complex_object(PyObject *v, char flag, WFILE *p);
 
 static void
 w_object(PyObject *v, WFILE *p)
 {
     char flag = '\0';
+
+    if (p->error != WFERR_OK) {
+        return;
+    }
 
     p->depth++;
 
@@ -668,6 +701,7 @@ w_complex_object(PyObject *v, char flag, WFILE *p)
         w_object(co->co_linetable, p);
         w_object(co->co_exceptiontable, p);
         Py_DECREF(co_code);
+        w_complete(v, p);
     }
     else if (PyObject_CheckBuffer(v)) {
         /* Write unknown bytes-like objects as a bytes object */
@@ -693,6 +727,7 @@ w_complex_object(PyObject *v, char flag, WFILE *p)
         w_object(slice->start, p);
         w_object(slice->stop, p);
         w_object(slice->step, p);
+        w_complete(v, p);
     }
     else {
         W_TYPE(TYPE_UNKNOWN, p);
@@ -1259,16 +1294,12 @@ r_object(RFILE *p)
                 }
                 break;
             }
-            v = PyBytes_FromStringAndSize((char *)NULL, n);
-            if (v == NULL)
-                break;
             ptr = r_string(n, p);
             if (ptr == NULL) {
-                Py_DECREF(v);
                 break;
             }
-            memcpy(PyBytes_AS_STRING(v), ptr, n);
-            retval = v;
+            // Get a singleton for 1-byte string
+            retval = PyBytes_FromStringAndSize(ptr, n);  // can be NULL
             R_REF(retval);
             break;
         }
@@ -1573,7 +1604,7 @@ r_object(RFILE *p)
                 goto code_error;
             firstlineno = (int)r_long(p);
             if (firstlineno == -1 && PyErr_Occurred())
-                break;
+                goto code_error;
             linetable = r_object(p);
             if (linetable == NULL)
                 goto code_error;
@@ -2010,14 +2041,14 @@ marshal.dumps
 
 Return the bytes object that would be written to a file by dump(value, file).
 
-Raise a ValueError exception if value has (or contains an object that has) an
-unsupported type.
+Raise a ValueError exception if value has (or contains an object that
+has) an unsupported type.
 [clinic start generated code]*/
 
 static PyObject *
 marshal_dumps_impl(PyObject *module, PyObject *value, int version,
                    int allow_code)
-/*[clinic end generated code: output=115f90da518d1d49 input=167eaecceb63f0a8]*/
+/*[clinic end generated code: output=115f90da518d1d49 input=d9609c4dee4507fb]*/
 {
     return _PyMarshal_WriteObjectToString(value, version, allow_code);
 }
@@ -2033,13 +2064,13 @@ marshal.loads
 
 Convert the bytes-like object to a value.
 
-If no valid value is found, raise EOFError, ValueError or TypeError.  Extra
-bytes in the input are ignored.
+If no valid value is found, raise EOFError, ValueError or TypeError.
+Extra bytes in the input are ignored.
 [clinic start generated code]*/
 
 static PyObject *
 marshal_loads_impl(PyObject *module, Py_buffer *bytes, int allow_code)
-/*[clinic end generated code: output=62c0c538d3edc31f input=14de68965b45aaa7]*/
+/*[clinic end generated code: output=62c0c538d3edc31f input=286f1dbd6811d2ad]*/
 {
     RFILE rf;
     char *s = bytes->buf;

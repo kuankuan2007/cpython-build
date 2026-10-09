@@ -577,11 +577,10 @@ class TimeTestCase(unittest.TestCase):
 
         # thread_time() should not include time spend during a sleep
         start = time.thread_time()
-        time.sleep(0.100)
+        time.sleep(0.200)
         stop = time.thread_time()
-        # use 20 ms because thread_time() has usually a resolution of 15 ms
-        # on Windows
-        self.assertLess(stop - start, 0.020)
+        # gh-143528: use 100 ms to support slow CI
+        self.assertLess(stop - start, 0.100)
 
         info = time.get_clock_info('thread_time')
         self.assertTrue(info.monotonic)
@@ -977,6 +976,17 @@ class TestCPyTime(CPyTimeTestCase, unittest.TestCase):
         for time_rnd, _ in ROUNDING_MODES:
             with self.assertRaises(ValueError):
                 _PyTime_FromSecondsObject(float('nan'), time_rnd)
+
+    def test_FromSecondsObject_float_overflow_message(self):
+        # Float path must report a PyTime_t overflow, like the integer path.
+        from _testinternalcapi import _PyTime_FromSecondsObject
+        for value in (PyTime_MAX, PyTime_MIN):
+            for time_rnd, _ in ROUNDING_MODES:
+                with self.subTest(value=value, time_rnd=time_rnd):
+                    with self.assertRaisesRegex(
+                            OverflowError,
+                            "timestamp out of range for C PyTime_t"):
+                        _PyTime_FromSecondsObject(value, time_rnd)
 
     def test_AsSecondsDouble(self):
         from _testcapi import PyTime_AsSecondsDouble

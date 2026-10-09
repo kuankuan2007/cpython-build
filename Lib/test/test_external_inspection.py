@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 import os
 import textwrap
 import importlib
@@ -14,6 +15,7 @@ from test.support import (
     busy_retry,
     requires_gil_enabled,
 )
+from test.support.import_helper import import_module
 from test.support.script_helper import make_script
 from test.support.socket_helper import find_unused_port
 
@@ -64,6 +66,23 @@ def get_all_awaited_by(pid):
 
 class TestGetStackTrace(unittest.TestCase):
     maxDiff = None
+
+    @skip_if_not_supported
+    def test_long_task_name_is_truncated(self):
+        # gh-157788
+        async def main():
+            asyncio.create_task(asyncio.sleep(10_000), name="x" * 300)
+            await asyncio.sleep(0)
+            names = [
+                task.task_name
+                for info in RemoteUnwinder(os.getpid()).get_all_awaited_by()
+                for task in info.awaited_by
+            ]
+            return asyncio.current_task().get_name(), names
+
+        main_name, names = asyncio.run(main())
+        self.assertIn(main_name, names)
+        self.assertEqual([len(n) for n in names if n.startswith("x")], [255])
 
     @skip_if_not_supported
     @unittest.skipIf(
@@ -149,6 +168,48 @@ class TestGetStackTrace(unittest.TestCase):
                     break
             else:
                 self.fail("Main thread stack trace not found in result")
+
+    @skip_if_not_supported
+    @unittest.skipIf(
+        sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,
+        "Test only runs on Linux with process_vm_readv support",
+    )
+    def test_self_trace_after_ctypes_import(self):
+        """Test that RemoteUnwinder works on the same process after _ctypes import.
+
+        When _ctypes is imported, it may call dlopen on the libpython shared
+        library, creating a duplicate mapping in the process address space.
+        The remote debugging code must skip these uninitialized duplicate
+        mappings and find the real PyRuntime. See gh-144563.
+        """
+
+        # Skip the test if the _ctypes module is missing.
+        import_module("_ctypes")
+
+        # Run the test in a subprocess to avoid side effects
+        script = textwrap.dedent("""\
+            import os
+            import _remote_debugging
+
+            # Should work before _ctypes import
+            unwinder = _remote_debugging.RemoteUnwinder(os.getpid())
+
+            import _ctypes
+
+            # Should still work after _ctypes import (gh-144563)
+            unwinder = _remote_debugging.RemoteUnwinder(os.getpid())
+            """)
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
     @skip_if_not_supported
     @unittest.skipIf(
@@ -1255,6 +1316,125 @@ class TestGetStackTrace(unittest.TestCase):
                 all_thread_ids,
                 "GIL holder should be among all threads",
             )
+
+    @skip_if_not_supported
+    @unittest.skipIf(sys._is_gil_enabled(), "Requires free-threading")
+    @unittest.skipIf(
+        sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,
+        "Requires process_vm_readv",
+    )
+    def test_tlbc_cache_refresh_after_growth(self):
+        # Reproducer from gh-157660.
+        script = textwrap.dedent("""\
+            import os, threading
+            from _remote_debugging import RemoteUnwinder
+            from test import support
+
+            go = threading.Event()
+            stop = threading.Event()
+
+            def leaf():
+                stop.wait()
+
+            def wait_for_leaf_frames(u, expected_count):
+                for _ in support.sleeping_retry(
+                    support.SHORT_TIMEOUT,
+                    f"Expected {expected_count} leaf frames",
+                ):
+                    try:
+                        traces = u.get_stack_trace()
+                    except RuntimeError as exc:
+                        if str(exc) != "Failed to parse initial frame in chain":
+                            raise
+                        continue
+                    count = sum(
+                        f.funcname == "leaf"
+                        for t in traces for f in t.frame_info
+                    )
+                    if count == expected_count:
+                        return
+
+            threading.Thread(target=leaf, daemon=True).start()
+            for _ in range(16):
+                threading.Thread(target=stop.wait, daemon=True).start()
+            threading.Thread(target=lambda: (go.wait(), leaf()), daemon=True).start()
+
+            u = RemoteUnwinder(os.getpid(), all_threads=True)
+            wait_for_leaf_frames(u, 1)
+            go.set()
+            wait_for_leaf_frames(u, 2)
+            """)
+        result = subprocess.run(
+            [sys.executable, "-X", "gil=0", "-X", "tlbc=1", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"stdout: {result.stdout}\nstderr: {result.stderr}",
+        )
+
+    @skip_if_not_supported
+    @unittest.skipIf(sys._is_gil_enabled(), "Requires free-threading")
+    @unittest.skipIf(
+        sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,
+        "Requires process_vm_readv",
+    )
+    def test_tlbc_cache_refresh_after_slot_fill(self):
+        # Reproducer from gh-157660.
+        script = textwrap.dedent("""\
+            import os, threading
+            from _remote_debugging import RemoteUnwinder
+
+            go = threading.Event()
+            stop = threading.Event()
+
+            def leaf():
+                stop.wait()
+
+            from test import support
+
+            def lines(u, expected_count):
+                for _ in support.sleeping_retry(
+                    support.SHORT_TIMEOUT,
+                    f"Expected {expected_count} leaf frames",
+                ):
+                    try:
+                        traces = u.get_stack_trace()
+                    except RuntimeError as exc:
+                        if str(exc) != "Failed to parse initial frame in chain":
+                            raise
+                        continue
+                    result = sorted(
+                        f.lineno
+                        for t in traces for f in t.frame_info
+                        if f.funcname == "leaf"
+                    )
+                    # A new frame can still point at the function definition.
+                    if (len(result) == expected_count and
+                        leaf.__code__.co_firstlineno not in result):
+                        return result
+
+            threading.Thread(target=leaf, daemon=True).start()
+            threading.Thread(target=lambda: (go.wait(), leaf()), daemon=True).start()
+            u = RemoteUnwinder(os.getpid(), all_threads=True)
+            before = lines(u, 1)
+            assert before == [8], before
+            go.set()
+            cached = lines(u, 2)
+            assert cached == [8, 8], cached
+            """)
+        result = subprocess.run(
+            [sys.executable, "-X", "gil=0", "-X", "tlbc=1", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"stdout: {result.stdout}\nstderr: {result.stderr}",
+        )
 
 
 if __name__ == "__main__":

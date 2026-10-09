@@ -334,14 +334,14 @@ int_converter
 
     a: int = 12
     b: int(accept={int}) = 34
-    c: int(accept={str}) = 45
+    c: int(accept={str}) = '-'
     /
 
 [clinic start generated code]*/
 
 static PyObject *
 int_converter_impl(PyObject *module, int a, int b, int c)
-/*[clinic end generated code: output=8e56b59be7d0c306 input=a1dbc6344853db7a]*/
+/*[clinic end generated code: output=8e56b59be7d0c306 input=9a306d4dc907e339]*/
 {
     RETURN_PACKED_ARGS(3, PyLong_FromLong, long, a, b, c);
 }
@@ -1232,6 +1232,52 @@ posonly_poskw_varpos_array_impl(PyObject *module, PyObject *a, PyObject *b,
 }
 
 
+/*[clinic input]
+group_and_opt
+
+    [
+    a: object
+    b: object
+    ]
+    c: object = None
+    /
+
+[clinic start generated code]*/
+
+static PyObject *
+group_and_opt_impl(PyObject *module, int group_left_1, PyObject *a,
+                   PyObject *b, PyObject *c)
+/*[clinic end generated code: output=23413ec545526111 input=8a84d8f44bc8bd0b]*/
+{
+    return pack_arguments_newref(4, group_left_1 ? Py_True : Py_False,
+                                 a, b, c);
+}
+
+
+/*[clinic input]
+group_and_two_opt
+
+    [
+    a: object
+    b: object
+    c: object
+    ]
+    d: object = None
+    e: object = None
+    /
+
+[clinic start generated code]*/
+
+static PyObject *
+group_and_two_opt_impl(PyObject *module, int group_left_1, PyObject *a,
+                       PyObject *b, PyObject *c, PyObject *d, PyObject *e)
+/*[clinic end generated code: output=1427c4b3c35f24ff input=cdda98eec1e365ea]*/
+{
+    return pack_arguments_newref(6, group_left_1 ? Py_True : Py_False,
+                                 a, b, c, d, e);
+}
+
+
 
 /*[clinic input]
 gh_32092_oob
@@ -1360,6 +1406,7 @@ clone_f2_impl(PyObject *module, const char *path)
 class custom_t_converter(CConverter):
     type = 'custom_t'
     converter = 'custom_converter'
+    c_init_default = "<placeholder>"  # overridden in pre_render(()
 
     def pre_render(self):
         self.c_default = f'''{{
@@ -1367,7 +1414,7 @@ class custom_t_converter(CConverter):
         }}'''
 
 [python start generated code]*/
-/*[python end generated code: output=da39a3ee5e6b4b0d input=b2fb801e99a06bf6]*/
+/*[python end generated code: output=da39a3ee5e6b4b0d input=78fe84e5ecc0481b]*/
 
 
 /*[clinic input]
@@ -2367,6 +2414,8 @@ static PyMethodDef tester_methods[] = {
     POSONLY_VARPOS_ARRAY_METHODDEF
     POSONLY_REQ_OPT_VARPOS_ARRAY_METHODDEF
     POSONLY_POSKW_VARPOS_ARRAY_METHODDEF
+    GROUP_AND_OPT_METHODDEF
+    GROUP_AND_TWO_OPT_METHODDEF
 
     GH_32092_OOB_METHODDEF
     GH_32092_KW_PASS_METHODDEF

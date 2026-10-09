@@ -893,6 +893,22 @@ class IOTest(unittest.TestCase):
         self.assertEqual(rawio.read(2), None)
         self.assertEqual(rawio.read(2), b"")
 
+    def test_RawIOBase_read_bounds_checking(self):
+        # Make sure a `.readinto` call which returns a value outside
+        # (0, len(buffer)) raises.
+        class Misbehaved(self.RawIOBase):
+            def __init__(self, readinto_return) -> None:
+                self._readinto_return = readinto_return
+            def readinto(self, b):
+                return self._readinto_return
+
+        with self.assertRaises(ValueError) as cm:
+            Misbehaved(2).read(1)
+        self.assertEqual(str(cm.exception), "readinto returned 2 outside buffer size 1")
+        for bad_size in (2147483647, sys.maxsize, -1, -1000):
+            with self.assertRaises(ValueError):
+                Misbehaved(bad_size).read()
+
     def test_types_have_dict(self):
         test = (
             self.IOBase(),
@@ -3321,6 +3337,24 @@ class TextIOWrapperTest(unittest.TestCase):
         self.assertEqual(f.tell(), p1)
         f.close()
 
+    def test_tell_after_readline_with_cr(self):
+        # Test for gh-141314: TextIOWrapper.tell() assertion failure
+        # when dealing with standalone carriage returns
+        data = b'line1\r'
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+
+        with self.open(os_helper.TESTFN, "r") as f:
+            # Read line that ends with \r
+            line = f.readline()
+            self.assertEqual(line, "line1\n")
+            # This should not cause an assertion failure
+            pos = f.tell()
+            # Verify we can seek back to this position
+            f.seek(pos)
+            remaining = f.read()
+            self.assertEqual(remaining, "")
+
     def test_seek_with_encoder_state(self):
         f = self.open(os_helper.TESTFN, "w", encoding="euc_jis_2004")
         f.write("\u00e6\u0300")
@@ -4065,6 +4099,72 @@ class CTextIOWrapperTest(TextIOWrapperTest):
     io = io
     shutdown_error = "LookupError: unknown encoding: ascii"
 
+    def test_reentrant_seek_during_tell(self):
+        # gh-153539: reading short of _CHUNK_SIZE leaves residual bytes in the
+        # snapshot, so tell() re-decodes and calls the decoder's getstate(); a
+        # reentrant seek() there must not free the snapshot tell() still uses.
+        # C-only: _pyio binds next_input as a strong local and cannot crash.
+        wrapper = None
+        armed = False
+
+        class ReentrantDecoder(codecs.IncrementalDecoder):
+            def decode(self, input, final=False):
+                return bytes(input).decode("latin-1")
+            def getstate(self):
+                nonlocal armed
+                if wrapper is not None and armed:
+                    armed = False
+                    wrapper.seek(0)
+                return (b"", 0)
+            def setstate(self, state):
+                pass
+
+        def search(name):
+            if name != "reentrant_tell_test":
+                return None
+            return codecs.CodecInfo(
+                name=name,
+                encode=lambda s, e='strict': (s.encode("latin-1"), len(s)),
+                decode=lambda b, e='strict': (bytes(b).decode("latin-1"), len(b)),
+                incrementaldecoder=ReentrantDecoder)
+
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        raw = self.BytesIO(b"abcdefghijklmnop" * 8)
+        wrapper = self.TextIOWrapper(self.BufferedReader(raw),
+                                     encoding="reentrant_tell_test", newline="")
+        wrapper._CHUNK_SIZE = 8
+        wrapper.read(5)
+        armed = True
+        self.assertIsInstance(wrapper.tell(), int)
+        # tell() at the snapshot boundary takes the early return that owns and
+        # must release next_input; exercise it too (leak-checked under -R).
+        wrapper.seek(0)
+        self.assertIsInstance(wrapper.tell(), int)
+
+    def test_chunk_size(self):
+        t = self.TextIOWrapper(self.BytesIO(), encoding="utf-8")
+        self.assertGreater(t._CHUNK_SIZE, 0)
+        t._CHUNK_SIZE = 1024
+        self.assertEqual(t._CHUNK_SIZE, 1024)
+        with self.assertRaisesRegex(ValueError,
+                                    'a strictly positive integer is required'):
+            t._CHUNK_SIZE = 0
+        with self.assertRaises(TypeError):
+            t._CHUNK_SIZE = 'x'
+        with self.assertRaises(ValueError):
+            t._CHUNK_SIZE = sys.maxsize + 1
+        with self.assertRaises(ValueError):
+            t._CHUNK_SIZE = -sys.maxsize - 2
+        with self.assertRaises(ValueError):
+            t._CHUNK_SIZE = 2**1000
+        with self.assertRaises(ValueError):
+            t._CHUNK_SIZE = -2**1000
+        with self.assertRaisesRegex(AttributeError, 'cannot be deleted'):
+            del t._CHUNK_SIZE
+        # a failed assignment does not change the value
+        self.assertEqual(t._CHUNK_SIZE, 1024)
+
     def test_initialization(self):
         r = self.BytesIO(b"\xc3\xa9\n\n")
         b = self.BufferedReader(r, 1000)
@@ -4159,6 +4259,22 @@ class CTextIOWrapperTest(TextIOWrapperTest):
 
         self.assertEqual([b"abcdef", b"middle", b"g"*chunk_size],
                          buf._write_stack)
+
+    def test_issue142594(self):
+        wrapper = None
+        detached = False
+        class ReentrantRawIO(self.RawIOBase):
+            @property
+            def closed(self):
+                nonlocal detached
+                if wrapper is not None and not detached:
+                    detached = True
+                    wrapper.detach()
+                return False
+
+        raw = ReentrantRawIO()
+        wrapper = self.TextIOWrapper(raw)
+        wrapper.close()  # should not crash
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest):
@@ -5014,12 +5130,12 @@ class ProtocolsTest(unittest.TestCase):
             pass
 
     def test_reader_subclass(self):
-        self.assertIsSubclass(MyReader, io.Reader[bytes])
-        self.assertNotIsSubclass(str, io.Reader[bytes])
+        self.assertIsSubclass(self.MyReader, io.Reader)
+        self.assertNotIsSubclass(str, io.Reader)
 
     def test_writer_subclass(self):
-        self.assertIsSubclass(MyWriter, io.Writer[bytes])
-        self.assertNotIsSubclass(str, io.Writer[bytes])
+        self.assertIsSubclass(self.MyWriter, io.Writer)
+        self.assertNotIsSubclass(str, io.Writer)
 
 
 def load_tests(loader, tests, pattern):
@@ -5033,6 +5149,7 @@ def load_tests(loader, tests, pattern):
              CTextIOWrapperTest, PyTextIOWrapperTest,
              CMiscIOTest, PyMiscIOTest,
              CSignalsTest, PySignalsTest, TestIOCTypes,
+             ProtocolsTest,
              )
 
     # Put the namespaces of the IO module we are testing and some useful mock

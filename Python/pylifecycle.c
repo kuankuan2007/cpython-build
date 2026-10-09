@@ -417,7 +417,8 @@ interpreter_update_config(PyThreadState *tstate, int only_update_path_config)
         }
     }
 
-    tstate->interp->long_state.max_str_digits = config->int_max_str_digits;
+    _Py_atomic_store_int(&tstate->interp->long_state.max_str_digits,
+                         config->int_max_str_digits);
 
     // Update the sys module for the new configuration
     if (_PySys_UpdateConfig(tstate) < 0) {
@@ -503,6 +504,7 @@ pycore_init_runtime(_PyRuntimeState *runtime,
     _PyRuntimeState_SetFinalizing(runtime, NULL);
 
     _Py_InitVersion();
+    _Py_DumpTraceback_Init();
 
     status = _Py_HashRandomization_Init(config);
     if (_PyStatus_EXCEPTION(status)) {
@@ -1600,6 +1602,7 @@ finalize_remove_modules(PyObject *modules, int verbose)
                 PyObject *value = PyObject_GetItem(modules, key);
                 if (value == NULL) {
                     PyErr_FormatUnraisable("Exception ignored while removing modules");
+                    Py_DECREF(key);
                     continue;
                 }
                 CLEAR_MODULE(key, value);
@@ -1922,7 +1925,6 @@ finalize_interp_clear(PyThreadState *tstate)
         _PyArg_Fini();
         _Py_ClearFileSystemEncoding();
         _PyPerfTrampoline_Fini();
-        _PyPerfTrampoline_FreeArenas();
     }
 
     finalize_interp_types(tstate->interp);
@@ -1999,6 +2001,7 @@ resolve_final_tstate(_PyRuntimeState *runtime)
             }
             else {
                 /* Fall back to the current tstate.  It's better than nothing. */
+                // XXX No it's not
                 main_tstate = tstate;
             }
         }
@@ -2043,6 +2046,16 @@ _Py_Finalize(_PyRuntimeState *runtime)
      */
 
     _PyAtExit_Call(tstate->interp);
+
+    /* Clean up any lingering subinterpreters.
+
+       Two preconditions need to be met here:
+
+        - This has to happen before _PyRuntimeState_SetFinalizing is
+          called, or else threads might get prematurely blocked.
+        - The world must not be stopped, as finalizers can run.
+    */
+    finalize_subinterpreters();
 
     assert(_PyThreadState_GET() == tstate);
 
@@ -2130,9 +2143,6 @@ _Py_Finalize(_PyRuntimeState *runtime)
     /* Destroy all modules */
     _PyImport_FiniExternal(tstate->interp);
     finalize_modules(tstate);
-
-    /* Clean up any lingering subinterpreters. */
-    finalize_subinterpreters();
 
     /* Print debug stats if any */
     _PyEval_Fini();
@@ -2298,17 +2308,16 @@ new_interpreter(PyThreadState **tstate_p,
        interpreters: disable PyGILState_Check(). */
     runtime->gilstate.check_enabled = 0;
 
-    PyInterpreterState *interp = PyInterpreterState_New();
-    if (interp == NULL) {
-        *tstate_p = NULL;
-        return _PyStatus_OK();
-    }
-    _PyInterpreterState_SetWhence(interp, whence);
-    interp->_ready = 1;
-
     // XXX Might new_interpreter() have been called without the GIL held?
     PyThreadState *save_tstate = _PyThreadState_GET();
     PyThreadState *tstate = NULL;
+    PyInterpreterState *interp;
+    status = _PyInterpreterState_New(save_tstate, &interp);
+    if (interp == NULL) {
+        goto error;
+    }
+    _PyInterpreterState_SetWhence(interp, whence);
+    interp->_ready = 1;
 
     /* From this point until the init_interp_create_gil() call,
        we must not do anything that requires that the GIL be held
@@ -2385,7 +2394,7 @@ error:
     *tstate_p = NULL;
     if (tstate != NULL) {
         Py_EndInterpreter(tstate);
-    } else {
+    } else if (interp != NULL) {
         PyInterpreterState_Delete(interp);
     }
     if (save_tstate != NULL) {
@@ -2415,9 +2424,8 @@ Py_NewInterpreter(void)
     return tstate;
 }
 
-/* Delete an interpreter and its last thread.  This requires that the
-   given thread state is current, that the thread has no remaining
-   frames, and that it is its interpreter's only remaining thread.
+/* Delete an interpreter.  This requires that the given thread state
+   is current, and that the thread has no remaining frames.
    It is a fatal error to violate these constraints.
 
    (Py_FinalizeEx() doesn't have these constraints -- it zaps
@@ -2447,14 +2455,19 @@ Py_EndInterpreter(PyThreadState *tstate)
     _Py_FinishPendingCalls(tstate);
 
     _PyAtExit_Call(tstate->interp);
-
-    if (tstate != interp->threads.head || tstate->next != NULL) {
-        Py_FatalError("not the last thread");
-    }
-
+    _PyRuntimeState *runtime = interp->runtime;
+    _PyEval_StopTheWorldAll(runtime);
     /* Remaining daemon threads will automatically exit
        when they attempt to take the GIL (ex: PyEval_RestoreThread()). */
     _PyInterpreterState_SetFinalizing(interp, tstate);
+
+    PyThreadState *list = _PyThreadState_RemoveExcept(tstate);
+    for (PyThreadState *p = list; p != NULL; p = p->next) {
+        _PyThreadState_SetShuttingDown(p);
+    }
+
+    _PyEval_StartTheWorldAll(runtime);
+    _PyThreadState_DeleteList(list, /*is_after_fork=*/0);
 
     // XXX Call something like _PyImport_Disable() here?
 
@@ -2485,6 +2498,8 @@ finalize_subinterpreters(void)
     PyInterpreterState *main_interp = _PyInterpreterState_Main();
     assert(final_tstate->interp == main_interp);
     _PyRuntimeState *runtime = main_interp->runtime;
+    assert(!runtime->stoptheworld.world_stopped);
+    assert(_PyRuntimeState_GetFinalizing(runtime) == NULL);
     struct pyinterpreters *interpreters = &runtime->interpreters;
 
     /* Get the first interpreter in the list. */
@@ -2504,7 +2519,7 @@ finalize_subinterpreters(void)
     (void)PyErr_WarnEx(
             PyExc_RuntimeWarning,
             "remaining subinterpreters; "
-            "destroy them with _interpreters.destroy()",
+            "close them with Interpreter.close()",
             0);
 
     /* Swap out the current tstate, which we know must belong
@@ -2513,27 +2528,17 @@ finalize_subinterpreters(void)
 
     /* Clean up all remaining subinterpreters. */
     while (interp != NULL) {
-        assert(!_PyInterpreterState_IsRunningMain(interp));
-
-        /* Find the tstate to use for fini.  We assume the interpreter
-           will have at most one tstate at this point. */
-        PyThreadState *tstate = interp->threads.head;
-        if (tstate != NULL) {
-            /* Ideally we would be able to use tstate as-is, and rely
-               on it being in a ready state: no exception set, not
-               running anything (tstate->current_frame), matching the
-               current thread ID (tstate->thread_id).  To play it safe,
-               we always delete it and use a fresh tstate instead. */
-            assert(tstate != final_tstate);
-            _PyThreadState_Attach(tstate);
-            PyThreadState_Clear(tstate);
-            _PyThreadState_Detach(tstate);
-            PyThreadState_Delete(tstate);
+        /* Make a tstate for finalization. */
+        PyThreadState *tstate = _PyThreadState_NewBound(interp, _PyThreadState_WHENCE_FINI);
+        if (tstate == NULL) {
+            // XXX Some graceful way to always get a thread state?
+            Py_FatalError("thread state allocation failed");
         }
-        tstate = _PyThreadState_NewBound(interp, _PyThreadState_WHENCE_FINI);
+
+        /* Enter the subinterpreter. */
+        _PyThreadState_Attach(tstate);
 
         /* Destroy the subinterpreter. */
-        _PyThreadState_Attach(tstate);
         Py_EndInterpreter(tstate);
         assert(_PyThreadState_GET() == NULL);
 
@@ -2968,7 +2973,9 @@ apple_log_write_impl(PyObject *self, PyObject *args)
 
     // Pass the user-provided text through explicit %s formatting
     // to avoid % literals being interpreted as a formatting directive.
-    os_log_with_type(OS_LOG_DEFAULT, logtype, "%s", text);
+    // Using {public} ensures "dynamic" string messages are visible
+    // in the log without special configuration.
+    os_log_with_type(OS_LOG_DEFAULT, logtype, "%{public}s", text);
     Py_RETURN_NONE;
 }
 
@@ -3356,7 +3363,9 @@ fatal_error(int fd, int header, const char *prefix, const char *msg,
        This function already did its best to display a traceback.
        Disable faulthandler to prevent writing a second traceback
        on abort(). */
-    _PyFaulthandler_Fini();
+    if (has_tstate_and_gil) {
+        _PyFaulthandler_Fini();
+    }
 
     /* Check if the current Python thread hold the GIL */
     if (has_tstate_and_gil) {
@@ -3594,7 +3603,7 @@ PyOS_getsig(int sig)
 
 /*
  * All of the code in this function must only use async-signal-safe functions,
- * listed at `man 7 signal` or
+ * listed at `man 7 signal-safety` or
  * http://www.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html.
  */
 PyOS_sighandler_t

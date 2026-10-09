@@ -7,7 +7,7 @@ from test.support import (verbose, refcount_test,
                           Py_GIL_DISABLED)
 from test.support.import_helper import import_module
 from test.support.os_helper import temp_dir, TESTFN, unlink
-from test.support.script_helper import assert_python_ok, make_script, run_test_script
+from test.support.script_helper import assert_python_ok, make_script
 from test.support import threading_helper, gc_threshold
 
 import gc
@@ -262,9 +262,11 @@ class GCTests(unittest.TestCase):
             #    finalizer.
             def __del__(self):
 
-                # 5. Create a weakref to `func` now. If we had created
-                #    it earlier, it would have been cleared by the
-                #    garbage collector before calling the finalizers.
+                # 5. Create a weakref to `func` now. In previous
+                #    versions of Python, this would avoid having it
+                #    cleared by the garbage collector before calling
+                #    the finalizers.  Now, weakrefs get cleared after
+                #    calling finalizers.
                 self[1].ref = weakref.ref(self[0])
 
                 # 6. Drop the global reference to `latefin`. The only
@@ -293,14 +295,18 @@ class GCTests(unittest.TestCase):
         #    which will find `cyc` and `func` as garbage.
         gc.collect()
 
-        # 9. Previously, this would crash because `func_qualname`
-        #    had been NULL-ed out by func_clear().
+        # 9. Previously, this would crash because the weakref
+        #    created in the finalizer revealed the function after
+        #    `tp_clear` was called and `func_qualname`
+        #    had been NULL-ed out by func_clear().  Now, we clear
+        #    weakrefs to unreachable objects before calling `tp_clear`
+        #    but after calling finalizers.
         print(f"{func=}")
         """
-        # We're mostly just checking that this doesn't crash.
         rc, stdout, stderr = assert_python_ok("-c", code)
         self.assertEqual(rc, 0)
-        self.assertRegex(stdout, rb"""\A\s*func=<function  at \S+>\s*\z""")
+        # The `func` global is None because the weakref was cleared.
+        self.assertRegex(stdout, rb"""\A\s*func=None""")
         self.assertFalse(stderr)
 
     @refcount_test
@@ -393,11 +399,19 @@ class GCTests(unittest.TestCase):
         # each call to collect(N)
         x = []
         gc.collect(0)
-        # x is now in the old gen
+        # x is now in gen 1
         a, b, c = gc.get_count()
-        # We don't check a since its exact values depends on
+        gc.collect(1)
+        # x is now in gen 2
+        d, e, f = gc.get_count()
+        gc.collect(2)
+        # x is now in gen 3
+        g, h, i = gc.get_count()
+        # We don't check a, d, g since their exact values depends on
         # internal implementation details of the interpreter.
         self.assertEqual((b, c), (1, 0))
+        self.assertEqual((e, f), (0, 1))
+        self.assertEqual((h, i), (0, 0))
 
     def test_trashcan(self):
         class Ouch:
@@ -776,6 +790,32 @@ class GCTests(unittest.TestCase):
             rc, out, err = assert_python_ok('-c', code)
             self.assertEqual(out.strip(), b'__del__ called')
 
+    @unittest.skipIf(Py_GIL_DISABLED, "requires GC generations or increments")
+    def test_gc_debug_stats(self):
+        # Checks that debug information is printed to stderr
+        # when DEBUG_STATS is set.
+        code = """if 1:
+            import gc
+            gc.set_debug(%s)
+            gc.collect()
+            """
+        _, _, err = assert_python_ok("-c", code % "gc.DEBUG_STATS")
+        self.assertRegex(err, b"gc: collecting generation [0-9]+")
+        self.assertRegex(
+            err,
+            b"gc: objects in each generation: [0-9]+ [0-9]+ [0-9]+",
+        )
+        self.assertRegex(
+            err, b"gc: objects in permanent generation: [0-9]+"
+        )
+        self.assertRegex(
+            err,
+            b"gc: done, .* unreachable, .* uncollectable, .* elapsed",
+        )
+
+        _, _, err = assert_python_ok("-c", code % "0")
+        self.assertNotIn(b"elapsed", err)
+
     def test_global_del_SystemExit(self):
         code = """if 1:
             class ClassWithDel:
@@ -838,9 +878,41 @@ class GCTests(unittest.TestCase):
         self.assertTrue(
                 any(l is element for element in gc.get_objects(generation=0))
         )
-        gc.collect()
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=1))
+        )
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=2))
+        )
+        gc.collect(generation=0)
         self.assertFalse(
                 any(l is element for element in gc.get_objects(generation=0))
+        )
+        self.assertTrue(
+                any(l is element for element in gc.get_objects(generation=1))
+        )
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=2))
+        )
+        gc.collect(generation=1)
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=0))
+        )
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=1))
+        )
+        self.assertTrue(
+                any(l is element for element in gc.get_objects(generation=2))
+        )
+        gc.collect(generation=2)
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=0))
+        )
+        self.assertFalse(
+                any(l is element for element in gc.get_objects(generation=1))
+        )
+        self.assertTrue(
+                any(l is element for element in gc.get_objects(generation=2))
         )
         del l
         gc.collect()
@@ -1131,15 +1203,31 @@ class GCTests(unittest.TestCase):
         assert_python_ok("-c", source)
 
 
-class IncrementalGCTests(unittest.TestCase):
+    @unittest.skipUnless(Py_GIL_DISABLED, "requires free-threaded GC")
     @unittest.skipIf(_testinternalcapi is None, "requires _testinternalcapi")
-    @requires_gil_enabled("Free threading does not support incremental GC")
-    def test_incremental_gc_handles_fast_cycle_creation(self):
-        # Run this test in a fresh process.  The number of alive objects (which can
-        # be from unit tests run before this one) can influence how quickly cyclic
-        # garbage is found.
-        script = support.findfile("_test_gc_fast_cycles.py")
-        run_test_script(script)
+    def test_tuple_untrack_counts(self):
+        # This ensures that the free-threaded GC is counting untracked tuples
+        # in the "long_lived_total" count.  This is required to avoid
+        # performance issues from running the GC too frequently.  See
+        # GH-142531 as an example.
+        gc.collect()
+        count = _testinternalcapi.get_long_lived_total()
+        n = 20_000
+        tuples = [(x,) for x in range(n)]
+        gc.collect()
+        new_count = _testinternalcapi.get_long_lived_total()
+        self.assertFalse(gc.is_tracked(tuples[0]))
+        # Use n // 2 just in case some other objects were collected.
+        self.assertTrue(new_count - count > (n // 2))
+
+    @requires_gil_enabled('need generational GC')
+    @unittest.skipIf(_testinternalcapi is None, "requires _testinternalcapi")
+    def test_heap_size(self):
+        count = _testinternalcapi.get_tracked_heap_size()
+        l = []
+        self.assertEqual(count + 1, _testinternalcapi.get_tracked_heap_size())
+        del l
+        self.assertEqual(count, _testinternalcapi.get_tracked_heap_size())
 
 
 class GCCallbackTests(unittest.TestCase):
@@ -1329,6 +1417,7 @@ class GCTogglingTests(unittest.TestCase):
     def tearDown(self):
         gc.disable()
 
+    @unittest.skipIf(Py_GIL_DISABLED, "requires GC generations or increments")
     def test_bug1055820c(self):
         # Corresponds to temp2c.py in the bug report.  This is pretty
         # elaborate.
@@ -1390,6 +1479,7 @@ class GCTogglingTests(unittest.TestCase):
             # The free-threaded build doesn't have multiple generations, so
             # just trigger a GC manually.
             gc.collect()
+        assert not detector.gc_happened
         while not detector.gc_happened:
             i += 1
             if i > 10000:
@@ -1501,6 +1591,39 @@ class GCTogglingTests(unittest.TestCase):
         finally:
             gc.enable()
 
+    def test_get_count_nonnegative(self):
+        xs = [[] for _ in range(1500)]
+        gc.collect()
+        del xs[:1000]
+        self.assertGreaterEqual(gc.get_count()[0], 0)
+
+    @gc_threshold(1000, 0, 0)
+    def test_get_count_does_not_prevent_collection(self):
+        junk = []
+        gc.collect()
+        detector = GC_Detector()
+        for _ in range(10000):
+            junk.append([])
+            gc.get_count()
+            if detector.gc_happened:
+                break
+        else:
+            self.fail("gc didn't happen after 10000 iterations")
+
+    # Ensure that setting *threshold0* to zero disables collection.
+    @gc_threshold(0)
+    def test_threshold_zero(self):
+        junk = []
+        i = 0
+        detector = GC_Detector()
+        while not detector.gc_happened:
+            i += 1
+            if i > 50000:
+                break
+            junk.append([])  # this may eventually trigger gc (if it is enabled)
+
+        self.assertEqual(i, 50001)
+
 
 class PythonFinalizationTests(unittest.TestCase):
     def test_ast_fini(self):
@@ -1520,6 +1643,19 @@ class PythonFinalizationTests(unittest.TestCase):
             # Store the tree somewhere to survive until the last GC collection
             support.late_deletion(tree)
         """)
+        assert_python_ok("-c", code)
+
+    def test_warnings_fini(self):
+        # See https://github.com/python/cpython/issues/137384
+        code = textwrap.dedent('''
+            import asyncio
+            from contextvars import ContextVar
+
+            context_loop = ContextVar("context_loop", default=None)
+            loop = asyncio.new_event_loop()
+            context_loop.set(loop)
+        ''')
+
         assert_python_ok("-c", code)
 
 

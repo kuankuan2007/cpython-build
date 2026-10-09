@@ -94,6 +94,7 @@ __all__ = [
 
 import __future__
 import difflib
+import functools
 import inspect
 import linecache
 import os
@@ -290,7 +291,8 @@ class _SpoofOut(StringIO):
         return result
 
     def truncate(self, size=None):
-        self.seek(size)
+        if size is not None:
+            self.seek(size)
         StringIO.truncate(self)
 
 # Worst-case linear-time ellipsis matching.
@@ -927,7 +929,7 @@ class DocTestFinder:
         # given object's docstring.
         try:
             file = inspect.getsourcefile(obj)
-        except TypeError:
+        except (TypeError, OSError):
             source_lines = None
         else:
             if not file:
@@ -1142,7 +1144,9 @@ class DocTestFinder:
         if inspect.ismethod(obj): obj = obj.__func__
         if isinstance(obj, property):
             obj = obj.fget
-        if inspect.isfunction(obj) and getattr(obj, '__doc__', None):
+        if isinstance(obj, functools.cached_property):
+            obj = obj.func
+        if inspect.isroutine(obj) and getattr(obj, '__doc__', None):
             # We don't use `docstring` var here, because `obj` can be changed.
             obj = inspect.unwrap(obj)
             try:

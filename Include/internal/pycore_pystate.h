@@ -149,6 +149,23 @@ extern void _PyThreadState_Detach(PyThreadState *tstate);
 // to the "detached" state.
 extern void _PyThreadState_Suspend(PyThreadState *tstate);
 
+#ifdef Py_GIL_DISABLED
+// Try to atomically transition a *different* thread's state from "detached"
+// to "suspended". On success, the target thread cannot attach until
+// _PyThreadState_ResumeDetached() is called, and the caller may safely
+// perform operations that are normally only permitted for the owning thread
+// (such as merging the biased reference counts of objects it owns).
+//
+// The caller must not run arbitrary Python code, allocate GC objects, or
+// stop the world while holding the thread in the suspended state.
+// Returns 1 on success, 0 if the thread was not in the "detached" state.
+extern int _PyThreadState_TrySuspendDetached(PyThreadState *tstate);
+
+// Undo a successful _PyThreadState_TrySuspendDetached(): switch the thread
+// back to "detached" and wake it if it is waiting to attach.
+extern void _PyThreadState_ResumeDetached(PyThreadState *tstate);
+#endif
+
 // Mark the thread state as "shutting down". This is used during interpreter
 // and runtime finalization. The thread may no longer attach to the
 // interpreter and will instead block via _PyThreadState_HangThread().
@@ -326,7 +343,11 @@ _Py_RecursionLimit_GetMargin(PyThreadState *tstate)
     _PyThreadStateImpl *_tstate = (_PyThreadStateImpl *)tstate;
     assert(_tstate->c_stack_hard_limit != 0);
     intptr_t here_addr = _Py_get_machine_stack_pointer();
+#if _Py_STACK_GROWS_DOWN
     return Py_ARITHMETIC_RIGHT_SHIFT(intptr_t, here_addr - (intptr_t)_tstate->c_stack_soft_limit, _PyOS_STACK_MARGIN_SHIFT);
+#else
+    return Py_ARITHMETIC_RIGHT_SHIFT(intptr_t, (intptr_t)_tstate->c_stack_soft_limit - here_addr, _PyOS_STACK_MARGIN_SHIFT);
+#endif
 }
 
 #ifdef __cplusplus

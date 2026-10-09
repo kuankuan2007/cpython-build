@@ -75,12 +75,37 @@ the module and a copyright notice if you like).
    See :ref:`arg-parsing-string-and-buffers` for a description of this macro.
 
 All user-visible symbols defined by :file:`Python.h` have a prefix of ``Py`` or
-``PY``, except those defined in standard header files. For convenience, and
-since they are used extensively by the Python interpreter, ``"Python.h"``
-includes a few standard header files: ``<stdio.h>``, ``<string.h>``,
-``<errno.h>``, and ``<stdlib.h>``.  If the latter header file does not exist on
-your system, it declares the functions :c:func:`malloc`, :c:func:`free` and
-:c:func:`realloc` directly.
+``PY``, except those defined in standard header files.
+
+.. tip::
+
+   For backward compatibility, :file:`Python.h` includes several standard header files.
+   C extensions should include the standard headers that they use,
+   and should not rely on these implicit includes.
+   If using the limited C API version 3.13 or newer, the implicit includes are:
+
+   * ``<assert.h>``
+   * ``<intrin.h>`` (on Windows)
+   * ``<inttypes.h>``
+   * ``<limits.h>``
+   * ``<math.h>``
+   * ``<stdarg.h>``
+   * ``<wchar.h>``
+   * ``<sys/types.h>`` (if present)
+
+   If :c:macro:`Py_LIMITED_API` is not defined, or is set to version 3.12 or older,
+   the headers below are also included:
+
+   * ``<ctype.h>``
+   * ``<unistd.h>`` (on POSIX)
+
+   If :c:macro:`Py_LIMITED_API` is not defined, or is set to version 3.10 or older,
+   the headers below are also included:
+
+   * ``<errno.h>``
+   * ``<stdio.h>``
+   * ``<stdlib.h>``
+   * ``<string.h>``
 
 The next thing we add to our module file is the C function that will be called
 when the Python expression ``spam.system(string)`` is evaluated (we'll see
@@ -214,7 +239,7 @@ and initialize it by calling :c:func:`PyErr_NewException` in the module's
 
    SpamError = PyErr_NewException("spam.error", NULL, NULL);
 
-Since :c:data:`!SpamError` is a global variable, it will be overwitten every time
+Since :c:data:`!SpamError` is a global variable, it will be overwritten every time
 the module is reinitialized, when the :c:data:`Py_mod_exec` function is called.
 
 For now, let's avoid the issue: we will block repeated initialization by raising an
@@ -520,10 +545,8 @@ calling the Python callback functions from a C callback.  Other uses are also
 imaginable.
 
 Fortunately, the Python interpreter is easily called recursively, and there is a
-standard interface to call a Python function.  (I won't dwell on how to call the
-Python parser with a particular string as input --- if you're interested, have a
-look at the implementation of the :option:`-c` command line option in
-:file:`Modules/main.c` from the Python source code.)
+standard interface to call a Python function.  (If you're interested in how to call the
+Python parser with a particular string as input, see :ref:`veryhigh`.)
 
 Calling a Python function is easy.  First, the Python program must somehow pass
 you the Python function object.  You should provide a function (or some other
@@ -913,7 +936,7 @@ and the object is freed.
 
 An alternative strategy is called :dfn:`automatic garbage collection`.
 (Sometimes, reference counting is also referred to as a garbage collection
-strategy, hence my use of "automatic" to distinguish the two.)  The big
+strategy, hence the use of "automatic" to distinguish the two.)  The big
 advantage of automatic garbage collection is that the user doesn't need to call
 :c:func:`free` explicitly.  (Another claimed advantage is an improvement in speed
 or memory usage --- this is no hard fact however.)  The disadvantage is that for
@@ -1059,7 +1082,14 @@ references to all its items, so when item 1 is replaced, it has to dispose of
 the original item 1.  Now let's suppose the original item 1 was an instance of a
 user-defined class, and let's further suppose that the class defined a
 :meth:`!__del__` method.  If this class instance has a reference count of 1,
-disposing of it will call its :meth:`!__del__` method.
+disposing of it will call its :meth:`!__del__` method. Internally,
+:c:func:`PyList_SetItem` calls :c:func:`Py_DECREF` on the replaced item,
+which invokes replaced item's corresponding
+:c:member:`~PyTypeObject.tp_dealloc` function. During
+deallocation, :c:member:`~PyTypeObject.tp_dealloc` calls
+:c:member:`~PyTypeObject.tp_finalize`, which is mapped to the
+:meth:`!__del__` method for class instances (see :pep:`442`). This entire
+sequence happens synchronously within the :c:func:`PyList_SetItem` call.
 
 Since it is written in Python, the :meth:`!__del__` method can execute arbitrary
 Python code.  Could it perhaps do something to invalidate the reference to
@@ -1375,7 +1405,7 @@ Finally it should be mentioned that Capsules offer additional functionality,
 which is especially useful for memory allocation and deallocation of the pointer
 stored in a Capsule. The details are described in the Python/C API Reference
 Manual in the section :ref:`capsules` and in the implementation of Capsules (files
-:file:`Include/pycapsule.h` and :file:`Objects/pycapsule.c` in the Python source
+:file:`Include/pycapsule.h` and :file:`Objects/capsule.c` in the Python source
 code distribution).
 
 .. rubric:: Footnotes

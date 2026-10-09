@@ -875,7 +875,8 @@ static inline int _PyType_SUPPORTS_WEAKREFS(PyTypeObject *type) {
     return (type->tp_weaklistoffset != 0);
 }
 
-extern PyObject* _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems);
+// Export for 'array' shared extension.
+PyAPI_FUNC(PyObject*) _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems);
 PyAPI_FUNC(PyObject *) _PyType_NewManagedObject(PyTypeObject *type);
 
 extern PyTypeObject* _PyType_CalculateMetaclass(PyTypeObject *, PyObject *);
@@ -896,6 +897,9 @@ extern PyObject *_PyType_LookupRefAndVersion(PyTypeObject *, PyObject *,
 // type->tp_version or zero if name is missing. It doesn't set an exception!
 extern unsigned int
 _PyType_LookupStackRefAndVersion(PyTypeObject *type, PyObject *name, _PyStackRef *out);
+
+extern int _PyObject_GetMethodStackRef(PyThreadState *ts, _PyStackRef *self,
+                                       PyObject *name, _PyStackRef *method);
 
 // Cache the provided init method in the specialization cache of type if the
 // provided type version matches the current version of the type.

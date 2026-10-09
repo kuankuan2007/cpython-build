@@ -553,6 +553,33 @@ class Test_Csv(unittest.TestCase):
                         self.assertEqual(row, rows[i])
 
 
+    def test_reader_reentrant_iterator(self):
+        # gh-145105: re-entering the reader from the iterator must not crash.
+        class ReentrantIter:
+            def __init__(self):
+                self.reader = None
+                self.n = 0
+            def __iter__(self):
+                return self
+            def __next__(self):
+                self.n += 1
+                if self.n == 1:
+                    try:
+                        next(self.reader)
+                    except StopIteration:
+                        pass
+                    return "a,b"
+                if self.n == 2:
+                    return "x"
+                raise StopIteration
+
+        it = ReentrantIter()
+        reader = csv.reader(it)
+        it.reader = reader
+        with self.assertRaises(csv.Error):
+            next(reader)
+
+
 class TestDialectRegistry(unittest.TestCase):
     def test_registry_badargs(self):
         self.assertRaises(TypeError, csv.list_dialects, None)
@@ -918,6 +945,14 @@ class TestDictFields(unittest.TestCase):
         reader = csv.DictReader(f, fieldnames)
         self.assertEqual(reader.fieldnames, fieldnames)
 
+    def test_dict_reader_set_fieldnames(self):
+        fieldnames = ["a", "b", "c"]
+        f = StringIO()
+        reader = csv.DictReader(f)
+        self.assertIsNone(reader.fieldnames)
+        reader.fieldnames = fieldnames
+        self.assertEqual(reader.fieldnames, fieldnames)
+
     def test_dict_writer_fieldnames_rejects_iter(self):
         fieldnames = ["a", "b", "c"]
         f = StringIO()
@@ -933,6 +968,7 @@ class TestDictFields(unittest.TestCase):
     def test_dict_reader_fieldnames_is_optional(self):
         f = StringIO()
         reader = csv.DictReader(f, fieldnames=None)
+        self.assertIsNone(reader.fieldnames)
 
     def test_read_dict_fields(self):
         with TemporaryFile("w+", encoding="utf-8") as fileobj:
@@ -1353,6 +1389,22 @@ ghijkl\0mno
 ghi\0jkl
 """
 
+    sample15 = "\n\n\n"
+    sample16 = "abc\ndef\nghi"
+
+    sample17 = ["letter,offset"]
+    sample17.extend(f"{chr(ord('a') + i)},{i}" for i in range(20))
+    sample17.append("v,twenty_one")  # 'u' was skipped
+    sample17 = '\n'.join(sample17)
+
+    sample18 = ["letter,offset"]
+    sample18.extend(f"{chr(ord('a') + i)},{i}" for i in range(21))
+    sample18.append("v,twenty_one")  # 'u' was not skipped
+    sample18 = '\n'.join(sample18)
+
+    sample19 = ('time,title\r\n'
+                '2020-10-01,"Pocket - Save news, videos, stories and more"\r\n')
+
     def test_issue43625(self):
         sniffer = csv.Sniffer()
         self.assertTrue(sniffer.has_header(self.sample12))
@@ -1373,6 +1425,11 @@ ghi\0jkl
         sniffer = csv.Sniffer()
         self.assertIs(sniffer.has_header(self.sample8), False)
         self.assertIs(sniffer.has_header(self.header2 + self.sample8), True)
+
+    def test_has_header_checks_20_rows(self):
+        sniffer = csv.Sniffer()
+        self.assertFalse(sniffer.has_header(self.sample17))
+        self.assertTrue(sniffer.has_header(self.sample18))
 
     def test_guess_quote_and_delimiter(self):
         sniffer = csv.Sniffer()
@@ -1423,6 +1480,13 @@ ghi\0jkl
         self.assertEqual(dialect.quotechar, "'")
         dialect = sniffer.sniff(self.sample14)
         self.assertEqual(dialect.delimiter, '\0')
+        self.assertRaisesRegex(csv.Error, "Could not determine delimiter",
+                               sniffer.sniff, self.sample15)
+        self.assertRaisesRegex(csv.Error, "Could not determine delimiter",
+                               sniffer.sniff, self.sample16)
+        dialect = sniffer.sniff(self.sample19)
+        self.assertEqual(dialect.delimiter, ',')
+        self.assertEqual(dialect.quotechar, '"')
 
     def test_doublequote(self):
         sniffer = csv.Sniffer()
@@ -1436,6 +1500,57 @@ ghi\0jkl
         self.assertFalse(dialect.doublequote)
         dialect = sniffer.sniff(self.sample9)
         self.assertTrue(dialect.doublequote)
+
+    def test_sniff_regex_backtracking(self):
+        # gh-109638: this artificial sample used to take minutes.
+        sniffer = csv.Sniffer()
+        sample = '"",' * 100 + '"' * 100 + '0' + '"' * 100 + '0'
+        self.assertEqual(sniffer.sniff(sample).delimiter, ',')
+
+    def test_sniff_doublequote_across_fields(self):
+        # A quoted field which contains the delimiter, followed by
+        # an empty quoted field, is not a doubled quote.
+        sniffer = csv.Sniffer()
+        sample = '",","",","\n' * 4
+        dialect = sniffer.sniff(sample)
+        self.assertEqual(dialect.delimiter, ',')
+        self.assertEqual(dialect.quotechar, '"')
+        self.assertIs(dialect.doublequote, False)
+        self.assertEqual(next(csv.reader(StringIO(sample), dialect)),
+                         [',', '', ','])
+
+    def test_sniff_doublequote_record_separators(self):
+        # The record separator ends a field as a delimiter does.
+        sniffer = csv.Sniffer()
+        for sep in '\n', '\r\n', '\r':
+            with self.subTest(sep=sep):
+                sample = ('x,"a""b"' + sep + 'y,"c"' + sep) * 2
+                self.assertIs(sniffer.sniff(sample).doublequote, True)
+                sample = ('"",","' + sep) * 4
+                self.assertIs(sniffer.sniff(sample).doublequote, False)
+
+    def test_sniff_single_column(self):
+        # This sample used to be quadratic.
+        sniffer = csv.Sniffer()
+        sample = '"a"\n' + ' ' * 100000
+        with self.assertRaisesRegex(csv.Error, "Could not determine delimiter"):
+            sniffer.sniff(sample, delimiters=',;')
+
+    def test_sniff_space_delimiter(self):
+        # This sample used to be quadratic.
+        sniffer = csv.Sniffer()
+        sample = '"a" "b"\n' + ' ' * 100000
+        dialect = sniffer.sniff(sample)
+        self.assertEqual(dialect.delimiter, ' ')
+        self.assertIs(dialect.doublequote, False)
+
+    def test_sniff_quoted_single_column(self):
+        # gh-98820: this sample used to take minutes.
+        sniffer = csv.Sniffer()
+        sample = '"abcdefghijklmnopqrstuvwxyz"\n' * 10000
+        with self.assertRaisesRegex(csv.Error, "Could not determine delimiter"):
+            sniffer.sniff(sample, delimiters=',:|\t')
+
 
 class NUL:
     def write(s, *args):

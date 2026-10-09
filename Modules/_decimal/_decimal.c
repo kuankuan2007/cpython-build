@@ -1452,6 +1452,20 @@ static int
 context_clear(PyObject *op)
 {
     PyDecContextObject *self = _PyDecContextObject_CAST(op);
+    /* Since traps and flags hold a borrowed reference to the
+       flags stored in the context object, these references need
+       to be cleared when the context object is deallocated
+       because traps and flags can survive. See gh-146011. */
+    PyDecSignalDictObject *traps = _PyDecSignalDictObject_CAST(self->traps);
+    PyDecSignalDictObject *flags = _PyDecSignalDictObject_CAST(self->flags);
+
+    if (traps != NULL) {
+        traps->flags = NULL;
+    }
+    if (flags != NULL) {
+        flags->flags = NULL;
+    }
+
     Py_CLEAR(self->traps);
     Py_CLEAR(self->flags);
     return 0;
@@ -3552,7 +3566,8 @@ dec_format(PyObject *dec, PyObject *args)
 
         if (size > 0 && fmt[size-1] == 'N') {
             if (PyErr_WarnEx(PyExc_DeprecationWarning,
-                             "Format specifier 'N' is deprecated", 1) < 0) {
+                             "Format specifier 'N' is deprecated and "
+                             "slated for removal in Python 3.18", 1) < 0) {
                 return NULL;
             }
         }
@@ -6040,10 +6055,15 @@ _decimal_exec(PyObject *m)
 
     /* DecimalTuple */
     ASSIGN_PTR(collections, PyImport_ImportModule("collections"));
-    ASSIGN_PTR(state->DecimalTuple, (PyTypeObject *)PyObject_CallMethod(collections,
-                                 "namedtuple", "(ss)", "DecimalTuple",
-                                 "sign digits exponent"));
-
+    ASSIGN_PTR(obj, PyObject_CallMethod(collections, "namedtuple", "(ss)",
+                                        "DecimalTuple",
+                                        "sign digits exponent"));
+    if (!PyType_Check(obj)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "type is expected from namedtuple call");
+        goto error;
+    }
+    ASSIGN_PTR(state->DecimalTuple, (PyTypeObject *)obj);
     ASSIGN_PTR(obj, PyUnicode_FromString("decimal"));
     CHECK_INT(PyDict_SetItemString(state->DecimalTuple->tp_dict, "__module__", obj));
     Py_CLEAR(obj);

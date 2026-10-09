@@ -15,8 +15,11 @@ _PyTokenizer_tok_new(void)
     struct tok_state *tok = (struct tok_state *)PyMem_Calloc(
                                             1,
                                             sizeof(struct tok_state));
-    if (tok == NULL)
+    if (tok == NULL) {
+        PyErr_NoMemory();
         return NULL;
+    }
+
     tok->buf = tok->cur = tok->inp = NULL;
     tok->fp_interactive = 0;
     tok->interactive_src_start = NULL;
@@ -62,24 +65,6 @@ _PyTokenizer_tok_new(void)
     return tok;
 }
 
-static void
-free_fstring_expressions(struct tok_state *tok)
-{
-    int index;
-    tokenizer_mode *mode;
-
-    for (index = tok->tok_mode_stack_index; index >= 0; --index) {
-        mode = &(tok->tok_mode_stack[index]);
-        if (mode->last_expr_buffer != NULL) {
-            PyMem_Free(mode->last_expr_buffer);
-            mode->last_expr_buffer = NULL;
-            mode->last_expr_size = 0;
-            mode->last_expr_end = -1;
-            mode->in_format_spec = 0;
-        }
-    }
-}
-
 /* Free a tok_state structure */
 void
 _PyTokenizer_Free(struct tok_state *tok)
@@ -100,7 +85,6 @@ _PyTokenizer_Free(struct tok_state *tok)
     if (tok->interactive_src_start != NULL) {
         PyMem_Free(tok->interactive_src_start);
     }
-    free_fstring_expressions(tok);
     PyMem_Free(tok);
 }
 

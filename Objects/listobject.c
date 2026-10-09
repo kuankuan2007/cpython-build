@@ -595,7 +595,7 @@ list_repr_impl(PyListObject *v)
        so must refetch the list size on each iteration. */
     for (Py_ssize_t i = 0; i < Py_SIZE(v); ++i) {
         /* Hold a strong reference since repr(item) can mutate the list */
-        item = Py_NewRef(v->ob_item[i]);
+        item = Py_XNewRef(v->ob_item[i]);
 
         if (i > 0) {
             if (PyUnicodeWriter_WriteChar(writer, ',') < 0) {
@@ -2887,18 +2887,18 @@ list.sort
 
 Sort the list in ascending order and return None.
 
-The sort is in-place (i.e. the list itself is modified) and stable (i.e. the
-order of two equal elements is maintained).
+The sort is in-place (i.e. the list itself is modified) and stable
+(i.e. the order of two equal elements is maintained).
 
-If a key function is given, apply it once to each list item and sort them,
-ascending or descending, according to their function values.
+If a key function is given, apply it once to each list item and sort
+them, ascending or descending, according to their function values.
 
 The reverse flag can be set to sort in descending order.
 [clinic start generated code]*/
 
 static PyObject *
 list_sort_impl(PyListObject *self, PyObject *keyfunc, int reverse)
-/*[clinic end generated code: output=57b9f9c5e23fbe42 input=667bf25d0e3a3676]*/
+/*[clinic end generated code: output=57b9f9c5e23fbe42 input=c145526281e1fb9f]*/
 {
     MergeState ms;
     Py_ssize_t nremaining;
@@ -3538,8 +3538,14 @@ list___sizeof___impl(PyListObject *self)
 /*[clinic end generated code: output=3417541f95f9a53e input=b8030a5d5ce8a187]*/
 {
     size_t res = _PyObject_SIZE(Py_TYPE(self));
-    Py_ssize_t allocated = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->allocated);
-    res += (size_t)allocated * sizeof(void*);
+#ifdef Py_GIL_DISABLED
+    PyObject **ob_item = _Py_atomic_load_ptr(&self->ob_item);
+    if (ob_item != NULL) {
+        res += list_capacity(ob_item) * sizeof(PyObject *);
+    }
+#else
+    res += (size_t)self->allocated * sizeof(PyObject *);
+#endif
     return PyLong_FromSize_t(res);
 }
 
@@ -3562,7 +3568,8 @@ static PyMethodDef list_methods[] = {
     LIST_COUNT_METHODDEF
     LIST_REVERSE_METHODDEF
     LIST_SORT_METHODDEF
-    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS, PyDoc_STR("See PEP 585")},
+    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
+     PyDoc_STR("lists are generic over the type of their contents")},
     {NULL,              NULL}           /* sentinel */
 };
 

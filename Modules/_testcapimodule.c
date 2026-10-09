@@ -15,6 +15,10 @@
 #include "frameobject.h"          // PyFrame_New()
 #include "marshal.h"              // PyMarshal_WriteLongToFile()
 
+#ifdef bool
+#  error "The public headers should not include <stdbool.h>, see gh-90904"
+#endif
+
 #include <float.h>                // FLT_MAX
 #include <signal.h>
 #include <stddef.h>               // offsetof()
@@ -22,9 +26,8 @@
 #ifdef HAVE_SYS_WAIT_H
 #  include <sys/wait.h>           // W_STOPCODE
 #endif
-
-#ifdef bool
-#  error "The public headers should not include <stdbool.h>, see gh-48924"
+#ifdef HAVE_SYS_SYSCTL_H
+#  include <sys/sysctl.h>         // sysctlbyname()
 #endif
 
 #include "_testcapi/util.h"
@@ -36,6 +39,7 @@ static struct PyModuleDef _testcapimodule;
 // Module state
 typedef struct {
     PyObject *error; // _testcapi.error object
+    Py_ssize_t list_destroys;
 } testcapistate_t;
 
 static testcapistate_t*
@@ -116,8 +120,8 @@ test_sizeof_c_types(PyObject *self, PyObject *Py_UNUSED(ignored))
     do { \
         if (EXPECTED != sizeof(TYPE)) { \
             PyErr_Format(get_testerror(self),               \
-                         "sizeof(%s) = %u instead of %u",   \
-                         #TYPE, sizeof(TYPE), EXPECTED);    \
+                         "sizeof(%s) = %zu instead of %u",   \
+                         #TYPE, sizeof(TYPE), (unsigned)(EXPECTED));    \
             return (PyObject*)NULL; \
         } \
     } while (0)
@@ -224,6 +228,18 @@ pycompilestring(PyObject* self, PyObject *obj) {
         return NULL;
     }
     return Py_CompileString(the_string, "<string>", Py_file_input);
+}
+
+static PyObject*
+pycompilestringexflags(PyObject *self, PyObject *args) {
+    const char *the_string, *filename;
+    int start, flags;
+    if (!PyArg_ParseTuple(args, "ysii", &the_string, &filename, &start, &flags)) {
+        return NULL;
+    }
+    PyCompilerFlags cf = _PyCompilerFlags_INIT;
+    cf.cf_flags = flags;
+    return Py_CompileStringExFlags(the_string, filename, start, &cf, -1);
 }
 
 static PyObject*
@@ -1417,7 +1433,6 @@ pymarshal_write_long_to_file(PyObject* self, PyObject *args)
 
     fp = Py_fopen(filename, "wb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -1442,7 +1457,6 @@ pymarshal_write_object_to_file(PyObject* self, PyObject *args)
 
     fp = Py_fopen(filename, "wb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -1466,7 +1480,6 @@ pymarshal_read_short_from_file(PyObject* self, PyObject *args)
 
     fp = Py_fopen(filename, "rb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -1491,7 +1504,6 @@ pymarshal_read_long_from_file(PyObject* self, PyObject *args)
 
     fp = Py_fopen(filename, "rb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -1513,7 +1525,6 @@ pymarshal_read_last_object_from_file(PyObject* self, PyObject *args)
 
     FILE *fp = Py_fopen(filename, "rb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -1536,7 +1547,6 @@ pymarshal_read_object_from_file(PyObject* self, PyObject *args)
 
     FILE *fp = Py_fopen(filename, "rb");
     if (fp == NULL) {
-        PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
 
@@ -2401,6 +2411,36 @@ failed:
     return NULL;
 }
 
+static int
+_listdestroytracer(PyObject *obj, PyRefTracerEvent event, void *data)
+{
+    if (event == PyRefTracer_DESTROY && PyList_CheckExact(obj)) {
+        _Py_atomic_add_ssize((Py_ssize_t *)data, 1);
+    }
+    return 0;
+}
+
+static PyObject *
+start_counting_list_destroys(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    testcapistate_t *state = get_testcapi_state(self);
+    _Py_atomic_store_ssize(&state->list_destroys, 0);
+    if (PyRefTracer_SetTracer(_listdestroytracer, &state->list_destroys) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+stop_counting_list_destroys(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    if (PyRefTracer_SetTracer(NULL, NULL) != 0) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(
+        _Py_atomic_load_ssize(&get_testcapi_state(self)->list_destroys));
+}
+
 static PyObject *
 function_set_warning(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
@@ -2556,6 +2596,31 @@ toggle_reftrace_printer(PyObject *ob, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+
+#ifdef HAVE_SYSCTLBYNAME
+static PyObject*
+uptime_bsd(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
+{
+    struct timeval tv;
+    size_t size = sizeof(tv);
+    int res = sysctlbyname("kern.boottime", &tv, &size, NULL, 0);
+    if (res != 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    double boottime = (double)tv.tv_sec + tv.tv_usec * 1e-6;
+
+    PyTime_t now_t;
+    if (PyTime_Time(&now_t) < 0) {
+        return NULL;
+    }
+    double now = PyTime_AsSecondsDouble(now_t);
+
+    double uptime = now - boottime;
+    return PyFloat_FromDouble(uptime);
+}
+#endif
+
+
 static PyMethodDef TestMethods[] = {
     {"set_errno",               set_errno,                       METH_VARARGS},
     {"test_config",             test_config,                     METH_NOARGS},
@@ -2580,6 +2645,8 @@ static PyMethodDef TestMethods[] = {
     {"test_buildvalue_N",        test_buildvalue_N,              METH_NOARGS},
     {"test_buildvalue_p",       test_buildvalue_p,               METH_NOARGS},
     {"test_reftracer",          test_reftracer,                  METH_NOARGS},
+    {"start_counting_list_destroys", start_counting_list_destroys, METH_NOARGS},
+    {"stop_counting_list_destroys", stop_counting_list_destroys, METH_NOARGS},
     {"_test_thread_state",      test_thread_state,               METH_VARARGS},
     {"gilstate_ensure_release", gilstate_ensure_release,         METH_NOARGS},
 #ifndef MS_WINDOWS
@@ -2620,6 +2687,7 @@ static PyMethodDef TestMethods[] = {
     {"return_result_with_error", return_result_with_error, METH_NOARGS},
     {"getitem_with_error", getitem_with_error, METH_VARARGS},
     {"Py_CompileString",     pycompilestring, METH_O},
+    {"Py_CompileStringExFlags", pycompilestringexflags, METH_VARARGS},
     {"raise_SIGINT_then_send_None", raise_SIGINT_then_send_None, METH_VARARGS},
     {"stack_pointer", stack_pointer, METH_NOARGS},
 #ifdef W_STOPCODE
@@ -2650,6 +2718,9 @@ static PyMethodDef TestMethods[] = {
     {"test_atexit", test_atexit, METH_NOARGS},
     {"code_offset_to_line", _PyCFunction_CAST(code_offset_to_line), METH_FASTCALL},
     {"toggle_reftrace_printer", toggle_reftrace_printer, METH_O},
+#ifdef HAVE_SYSCTLBYNAME
+    {"uptime_bsd", uptime_bsd, METH_NOARGS},
+#endif
     {NULL, NULL} /* sentinel */
 };
 
@@ -3190,9 +3261,8 @@ typedef struct {
 } ManagedDictObject;
 
 int ManagedDict_traverse(PyObject *self, visitproc visit, void *arg) {
-    PyObject_VisitManagedDict(self, visit, arg);
     Py_VISIT(Py_TYPE(self));
-    return 0;
+    return PyObject_VisitManagedDict(self, visit, arg);
 }
 
 int ManagedDict_clear(PyObject *self) {
@@ -3336,6 +3406,10 @@ PyInit__testcapi(void)
     PyModule_AddObject(m, "INT64_MIN", PyLong_FromInt64(INT64_MIN));
     PyModule_AddObject(m, "INT64_MAX", PyLong_FromInt64(INT64_MAX));
     PyModule_AddObject(m, "UINT64_MAX", PyLong_FromUInt64(UINT64_MAX));
+
+    if (PyModule_AddIntMacro(m, _Py_STACK_GROWS_DOWN)) {
+        return NULL;
+    }
 
     if (PyModule_AddIntMacro(m, Py_single_input)) {
         return NULL;
@@ -3485,6 +3559,9 @@ PyInit__testcapi(void)
         return NULL;
     }
     if (_PyTestCapi_Init_Function(m) < 0) {
+        return NULL;
+    }
+    if (_PyTestCapi_Init_Weakref(m) < 0) {
         return NULL;
     }
 

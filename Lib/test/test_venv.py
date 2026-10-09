@@ -11,17 +11,17 @@ import os
 import os.path
 import pathlib
 import re
+import shlex
 import shutil
 import struct
 import subprocess
 import sys
 import sysconfig
 import tempfile
-import shlex
 from test.support import (captured_stdout, captured_stderr,
                           skip_if_broken_multiprocessing_synchronize, verbose,
                           requires_subprocess, is_android, is_apple_mobile,
-                          is_emscripten, is_wasi,
+                          is_wasm32,
                           requires_venv_with_pip, TEST_HOME_DIR,
                           requires_resource, copy_python_src_ignore)
 from test.support.os_helper import (can_symlink, EnvironmentVarGuard, rmtree,
@@ -42,7 +42,7 @@ requireVenvCreate = unittest.skipUnless(
     or sys._base_executable != sys.executable,
     'cannot run venv.create from within a venv on this platform')
 
-if is_android or is_apple_mobile or is_emscripten or is_wasi:
+if is_android or is_apple_mobile or is_wasm32:
     raise unittest.SkipTest("venv is not available on this platform")
 
 @requires_subprocess()
@@ -379,6 +379,16 @@ class BasicTest(BaseTest):
             with open(fn, 'wb') as f:
                 f.write(b'Still here?')
 
+    @unittest.skipUnless(hasattr(os, 'listxattr'), 'test requires os.listxattr')
+    def test_install_scripts_selinux(self):
+        """
+        gh-145417: Test that install_scripts does not copy SELinux context
+        when copying scripts.
+        """
+        with patch('os.listxattr') as listxattr_mock:
+            venv.create(self.env_dir)
+            listxattr_mock.assert_not_called()
+
     def test_overwrite_existing(self):
         """
         Test creating environment in an existing directory.
@@ -522,6 +532,8 @@ class BasicTest(BaseTest):
 
     # gh-124651: test quoted strings
     @unittest.skipIf(os.name == 'nt', 'contains invalid characters on Windows')
+    @unittest.skipIf(sys.platform.startswith('netbsd'),
+                     "NetBSD csh fails with quoted special chars; see gh-139308")
     def test_special_chars_csh(self):
         """
         Test that the template strings are quoted properly (csh)
@@ -586,6 +598,51 @@ class BasicTest(BaseTest):
         )
         self.assertEqual(out.strip(), '0')
 
+    @unittest.skipUnless(os.name == 'nt', 'only relevant on Windows')
+    def test_activate_bat_respects_disable_prompt(self):
+        rmtree(self.env_dir)
+        env_dir = os.path.join(os.path.realpath(self.env_dir), 'venv')
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(env_dir)
+        activate = os.path.join(env_dir, self.bindir, 'activate.bat')
+        test_batch = os.path.join(self.env_dir, 'test_disable_prompt.bat')
+        with open(test_batch, "w") as f:
+            f.write('@echo off\n'
+                    'set "PROMPT=base$G"\n'
+                    'set "VIRTUAL_ENV_DISABLE_PROMPT=1"\n'
+                    f'call "{activate}"\n'
+                    'echo ACTIVE_PROMPT:%PROMPT%\n'
+                    'echo VIRTUAL_ENV:%VIRTUAL_ENV%\n'
+                    'set "PROMPT=changed$G"\n'
+                    'call deactivate\n'
+                    'echo FINAL_PROMPT:%PROMPT%\n')
+        out, err = check_output([test_batch])
+        lines = out.splitlines()
+        self.assertEqual(lines[0], b'ACTIVE_PROMPT:base$G')
+        self.assertEndsWith(lines[1], os.fsencode(env_dir))
+        self.assertEqual(lines[2], b'FINAL_PROMPT:changed$G')
+
+    @unittest.skipUnless(os.name == 'nt', 'only relevant on Windows')
+    def test_activate_bat_prefixes_prompt_by_default(self):
+        rmtree(self.env_dir)
+        env_dir = os.path.join(os.path.realpath(self.env_dir), 'venv')
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(env_dir)
+        activate = os.path.join(env_dir, self.bindir, 'activate.bat')
+        test_batch = os.path.join(self.env_dir, 'test_enable_prompt.bat')
+        with open(test_batch, "w") as f:
+            f.write('@echo off\n'
+                    'set "PROMPT=base) $G"\n'
+                    'set "VIRTUAL_ENV_DISABLE_PROMPT="\n'
+                    f'call "{activate}"\n'
+                    'echo ACTIVE_PROMPT:%PROMPT%\n'
+                    'call deactivate\n'
+                    'echo FINAL_PROMPT:%PROMPT%\n')
+        out, err = check_output([test_batch])
+        lines = out.splitlines()
+        self.assertEqual(lines[0], b'ACTIVE_PROMPT:(venv) base) $G')
+        self.assertEqual(lines[1], b'FINAL_PROMPT:base) $G')
+
     @unittest.skipUnless(os.name == 'nt' and can_symlink(),
                          'symlinks on Windows')
     def test_failed_symlink(self):
@@ -646,6 +703,26 @@ class BasicTest(BaseTest):
             f.write("set -euo pipefail\n"
                     f"source {activate}\n"
                     "deactivate\n")
+        out, err = check_output([bash, test_script])
+        self.assertEqual(out, "".encode())
+        self.assertEqual(err, "".encode())
+
+    # gh-149701: Test exit code is zero even when hashing is disabled
+    @unittest.skipIf(os.name == 'nt', 'not relevant on Windows')
+    def test_deactivate_with_strict_bash_opts_and_hashing_disabled(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash required for this test")
+        rmtree(self.env_dir)
+        builder = venv.EnvBuilder(clear=True)
+        builder.create(self.env_dir)
+        activate = os.path.join(self.env_dir, self.bindir, "activate")
+        test_script = os.path.join(self.env_dir, "test_hash_disabled.sh")
+        with open(test_script, "w") as f:
+            f.write("set -euo pipefail\n"
+                    "set +h\n"  # disable hashing
+                    f"source {activate}\n"
+                    "deactivate")
         out, err = check_output([bash, test_script])
         self.assertEqual(out, "".encode())
         self.assertEqual(err, "".encode())

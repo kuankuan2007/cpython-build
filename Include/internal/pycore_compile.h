@@ -49,7 +49,8 @@ extern int _PyAST_Preprocess(
     PyObject *filename,
     int optimize,
     int ff_features,
-    int syntax_check_only);
+    int syntax_check_only,
+    int enable_warnings);
 
 
 typedef struct {
@@ -105,6 +106,7 @@ enum _PyCompile_FBlockType {
      COMPILE_FBLOCK_EXCEPTION_HANDLER,
      COMPILE_FBLOCK_EXCEPTION_GROUP_HANDLER,
      COMPILE_FBLOCK_ASYNC_COMPREHENSION_GENERATOR,
+     COMPILE_FBLOCK_INLINED_COMPREHENSION,
      COMPILE_FBLOCK_STOP_ITERATION,
 };
 

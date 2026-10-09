@@ -1,7 +1,7 @@
 """Get useful information from live Python objects.
 
 This module encapsulates the interface provided by the internal special
-attributes (co_*, im_*, tb_*, etc.) in a friendlier fashion.
+attributes (co_*, tb_*, etc.) in a friendlier fashion.
 It also provides some help for examining source code and class layout.
 
 Here are some of the useful functions provided by this module:
@@ -196,18 +196,18 @@ def ispackage(object):
 def ismethoddescriptor(object):
     """Return true if the object is a method descriptor.
 
-    But not if ismethod() or isclass() or isfunction() are true.
+    But not if ismethod(), isclass() or isfunction() is true.
 
-    This is new in Python 2.2, and, for example, is true of int.__add__.
-    An object passing this test has a __get__ attribute, but not a
-    __set__ attribute or a __delete__ attribute. Beyond that, the set
-    of attributes varies; __name__ is usually sensible, and __doc__
-    often is.
+    An object passing this test (for example, int.__add__) has a __get__
+    attribute, but not a __set__ attribute or a __delete__ attribute.
+    Beyond that, the set of attributes varies; __name__ is usually
+    sensible, and __doc__ often is.
 
     Methods implemented via descriptors that also pass one of the other
-    tests return false from the ismethoddescriptor() test, simply because
-    the other tests promise more -- you can, e.g., count on having the
-    __func__ attribute (etc) when an object passes ismethod()."""
+    tests (ismethod(), isclass(), isfunction()) make this function return
+    false, simply because those other tests promise more -- you can, for
+    example, count on having the __func__ attribute when an object passes
+    ismethod()."""
     if isclass(object) or ismethod(object) or isfunction(object):
         # mutual exclusion
         return False
@@ -219,8 +219,13 @@ def ismethoddescriptor(object):
 def isdatadescriptor(object):
     """Return true if the object is a data descriptor.
 
+    But not if ismethod(), isclass() or isfunction() is true.
+
     Data descriptors have a __set__ or a __delete__ attribute.  Examples are
-    properties (defined in Python) and getsets and members (defined in C).
+    properties, getsets, and members.  For the latter two (defined only in C
+    extension modules) more specific tests are available as well:
+    isgetsetdescriptor() and ismemberdescriptor(), respectively.
+
     Typically, data descriptors will also have __name__ and __doc__ attributes
     (properties, getsets, and members have both of these attributes), but this
     is not guaranteed."""
@@ -293,6 +298,8 @@ def _has_code_flag(f, flag):
     f = functools._unwrap_partial(f)
     if not (isfunction(f) or _signature_is_functionlike(f)):
         return False
+    # If it's a pure Python function, or an object that is duck type
+    # of a Python function (Cython and Mock functions, for instance), then:
     return bool(f.__code__.co_flags & flag)
 
 def isgeneratorfunction(obj):
@@ -348,6 +355,7 @@ def isgenerator(object):
         gi_frame        frame object or possibly None once the generator has
                         been exhausted
         gi_running      set to 1 when generator is executing, 0 otherwise
+        gi_suspended    set to 1 when the generator is suspended at a yield point, 0 otherwise
         gi_yieldfrom    object being iterated by yield from or None
 
         __iter__()      defined to support iteration over container
@@ -1056,7 +1064,7 @@ class BlockFinder:
     """Provide a tokeneater() method to detect the end of a code block."""
     def __init__(self):
         self.indent = 0
-        self.islambda = False
+        self.singleline = False
         self.started = False
         self.passline = False
         self.indecorator = False
@@ -1065,19 +1073,24 @@ class BlockFinder:
 
     def tokeneater(self, type, token, srowcol, erowcol, line):
         if not self.started and not self.indecorator:
+            if type in (tokenize.INDENT, tokenize.COMMENT, tokenize.NL):
+                pass
+            elif token == "async":
+                pass
             # skip any decorators
-            if token == "@":
+            elif token == "@":
                 self.indecorator = True
-            # look for the first "def", "class" or "lambda"
-            elif token in ("def", "class", "lambda"):
-                if token == "lambda":
-                    self.islambda = True
+            else:
+                # For "def" and "class" scan to the end of the block.
+                # For "lambda" and generator expression scan to
+                # the end of the logical line.
+                self.singleline = token not in ("def", "class")
                 self.started = True
             self.passline = True    # skip to the end of the line
         elif type == tokenize.NEWLINE:
             self.passline = False   # stop skipping when a NEWLINE is seen
             self.last = srowcol[0]
-            if self.islambda:       # lambdas always end at the first NEWLINE
+            if self.singleline:
                 raise EndOfBlock
             # hitting a NEWLINE when in a decorator without args
             # ends the decorator
@@ -1913,17 +1926,21 @@ def _signature_get_user_defined_method(cls, method_name, *, follow_wrapper_chain
     if meth is None:
         return None
 
+    # NOTE: The meth may wraps a non-user-defined callable.
+    # In this case, we treat the meth as non-user-defined callable too.
+    # (e.g. cls.__new__ generated by @warnings.deprecated)
+    unwrapped_meth = None
     if follow_wrapper_chains:
-        meth = unwrap(meth, stop=(lambda m: hasattr(m, "__signature__")
+        unwrapped_meth = unwrap(meth, stop=(lambda m: hasattr(m, "__signature__")
                                   or _signature_is_builtin(m)))
-    if isinstance(meth, _NonUserDefinedCallables):
+
+    if (isinstance(meth, _NonUserDefinedCallables)
+          or isinstance(unwrapped_meth, _NonUserDefinedCallables)):
         # Once '__signature__' will be added to 'C'-level
         # callables, this check won't be necessary
         return None
     if method_name != '__new__':
         meth = _descriptor_get(meth, cls)
-        if follow_wrapper_chains:
-            meth = unwrap(meth, stop=lambda m: hasattr(m, "__signature__"))
     return meth
 
 
@@ -2305,7 +2322,7 @@ def _signature_from_function(cls, func, skip_bound_arg=True,
             is_duck_function = True
         else:
             # If it's not a pure Python function, and not a duck type
-            # of pure function:
+            # of pure function (Cython and Mock functions, for instance), then:
             raise TypeError('{!r} is not a Python function'.format(func))
 
     s = getattr(func, "__text_signature__", None)
@@ -2498,7 +2515,7 @@ def _signature_from_callable(obj, *,
 
     if isfunction(obj) or _signature_is_functionlike(obj):
         # If it's a pure Python function, or an object that is duck type
-        # of a Python function (Cython functions, for instance), then:
+        # of a Python function (Cython and Mock functions, for instance), then:
         return _signature_from_function(sigcls, obj,
                                         skip_bound_arg=skip_bound_arg,
                                         globals=globals, locals=locals, eval_str=eval_str,
@@ -2650,11 +2667,12 @@ class Parameter:
         The annotation for the parameter if specified.  If the
         parameter has no annotation, this attribute is set to
         `Parameter.empty`.
-    * kind : str
+    * kind
         Describes how argument values are bound to the parameter.
         Possible values: `Parameter.POSITIONAL_ONLY`,
         `Parameter.POSITIONAL_OR_KEYWORD`, `Parameter.VAR_POSITIONAL`,
         `Parameter.KEYWORD_ONLY`, `Parameter.VAR_KEYWORD`.
+        Every value has a `description` attribute describing meaning.
     """
 
     __slots__ = ('_name', '_kind', '_default', '_annotation')
@@ -2701,6 +2719,10 @@ class Parameter:
                 raise ValueError(msg)
             self._kind = _POSITIONAL_ONLY
             name = 'implicit{}'.format(name[1:])
+        elif name == '.format':
+            # gh-151665: Hidden parameter of compiler-generated annotation and type
+            # alias/typevar evaluators. Show it as "format".
+            name = 'format'
 
         # It's possible for C functions to have a positional-only parameter
         # where the name is a keyword, so for compatibility we'll allow it.
@@ -3340,6 +3362,10 @@ def _main():
     """ Logic for inspecting an object given at command line """
     import argparse
     import importlib
+
+    # The printed text can contain characters unencodable in the encoding
+    # of stdout, e.g. undecodable bytes of a file name.
+    sys.stdout.reconfigure(errors='backslashreplace')
 
     parser = argparse.ArgumentParser(color=True)
     parser.add_argument(

@@ -1107,15 +1107,15 @@ _hmac.HMAC.hexdigest
 
 Return hexadecimal digest of the bytes passed to the update() method so far.
 
-This may be used to exchange the value safely in email or other non-binary
-environments.
+This may be used to exchange the value safely in email or other
+non-binary environments.
 
 This method may raise a MemoryError.
 [clinic start generated code]*/
 
 static PyObject *
 _hmac_HMAC_hexdigest_impl(HMACObject *self)
-/*[clinic end generated code: output=6659807a09ae14ec input=493b2db8013982b9]*/
+/*[clinic end generated code: output=6659807a09ae14ec input=5ae03f21d69c970c]*/
 {
     assert(self->digest_size <= Py_hmac_hash_max_digest_size);
     uint8_t digest[Py_hmac_hash_max_digest_size];
@@ -1529,7 +1529,6 @@ static void
 py_hmac_hinfo_ht_free(void *hinfo)
 {
     py_hmac_hinfo *entry = (py_hmac_hinfo *)hinfo;
-    assert(entry->display_name != NULL);
     if (--(entry->refcnt) == 0) {
         Py_CLEAR(entry->display_name);
         PyMem_Free(hinfo);
@@ -1604,16 +1603,19 @@ py_hmac_hinfo_ht_new(void)
         assert(value->display_name == NULL);
         value->refcnt = 0;
 
-#define Py_HMAC_HINFO_LINK(KEY)                                 \
-        do {                                                    \
-            int rc = py_hmac_hinfo_ht_add(table, KEY, value);   \
-            if (rc < 0) {                                       \
-                PyMem_Free(value);                              \
-                goto error;                                     \
-            }                                                   \
-            else if (rc == 1) {                                 \
-                value->refcnt++;                                \
-            }                                                   \
+#define Py_HMAC_HINFO_LINK(KEY)                                     \
+        do {                                                        \
+            int rc = py_hmac_hinfo_ht_add(table, (KEY), value);     \
+            if (rc < 0) {                                           \
+                /* entry may already be in ht, freed upon exit */   \
+                if (value->refcnt == 0) {                           \
+                    PyMem_Free(value);                              \
+                }                                                   \
+                goto error;                                         \
+            }                                                       \
+            else if (rc == 1) {                                     \
+                value->refcnt++;                                    \
+            }                                                       \
         } while (0)
         Py_HMAC_HINFO_LINK(e->name);
         Py_HMAC_HINFO_LINK(e->hashlib_name);
@@ -1625,7 +1627,8 @@ py_hmac_hinfo_ht_new(void)
             e->hashlib_name == NULL ? e->name : e->hashlib_name
         );
         if (value->display_name == NULL) {
-            PyMem_Free(value);
+            /* 'value' is owned by the table (refcnt > 0),
+               so _Py_hashtable_destroy() will free it. */
             goto error;
         }
     }

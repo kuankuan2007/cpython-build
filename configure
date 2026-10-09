@@ -826,6 +826,7 @@ OPENSSL_LDFLAGS
 OPENSSL_LIBS
 OPENSSL_INCLUDES
 ENSUREPIP
+CFLAGS_CEVAL
 SRCDIRS
 THREADHEADERS
 PANEL_LIBS
@@ -965,6 +966,7 @@ LDLIBRARY
 LIBRARY
 BUILDEXEEXT
 NO_AS_NEEDED
+_Py_STACK_GROWS_DOWN
 MULTIARCH_CPPFLAGS
 PLATFORM_TRIPLET
 MULTIARCH
@@ -3816,7 +3818,7 @@ fi
 
 
 
-for ac_prog in python$PACKAGE_VERSION python3.13 python3.12 python3.11 python3.10 python3 python
+for ac_prog in python$PACKAGE_VERSION python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3 python
 do
   # Extract the first word of "$ac_prog", so it can be a program name with args.
 set dummy $ac_prog; ac_word=$2
@@ -4359,7 +4361,7 @@ then :
 	yes)
 		case $ac_sys_system in
 			Darwin) enableval=/Library/Frameworks ;;
-			iOS)    enableval=iOS/Frameworks/\$\(MULTIARCH\) ;;
+			iOS)    enableval=Apple/iOS/Frameworks/\$\(MULTIARCH\) ;;
 			*) as_fn_error $? "Unknown platform for framework build" "$LINENO" 5
 		esac
 	esac
@@ -4470,9 +4472,9 @@ then :
 
 				prefix=$PYTHONFRAMEWORKPREFIX
 				PYTHONFRAMEWORKINSTALLNAMEPREFIX="@rpath/$PYTHONFRAMEWORKDIR"
-				RESSRCDIR=iOS/Resources
+				RESSRCDIR=Apple/iOS/Resources
 
-				ac_config_files="$ac_config_files iOS/Resources/Info.plist"
+				ac_config_files="$ac_config_files Apple/iOS/Resources/Info.plist"
 
 				;;
 			*)
@@ -4804,8 +4806,13 @@ case $host in #(
      ;;
 esac
 
-case $ac_sys_system in #(
-  iOS) :
+case $host in #(
+  *-apple-ios*-simulator) :
+
+    as_fn_append CFLAGS " -mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+    as_fn_append LDFLAGS " -mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
+   ;; #(
+  *-apple-ios*) :
 
     as_fn_append CFLAGS " -mios-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
     as_fn_append LDFLAGS " -mios-version-min=${IPHONEOS_DEPLOYMENT_TARGET}"
@@ -6594,7 +6601,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6643,7 +6650,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6675,7 +6682,7 @@ printf "%s\n" "no" >&6; }
 fi
 
   if test "x$ac_pt_CXX" = x; then
-    CXX="g++"
+    CXX="notfound"
   else
     case $cross_compiling:$ac_tool_warned in
 yes:)
@@ -6704,7 +6711,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6753,7 +6760,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6785,7 +6792,7 @@ printf "%s\n" "no" >&6; }
 fi
 
   if test "x$ac_pt_CXX" = x; then
-    CXX="c++"
+    CXX="notfound"
   else
     case $cross_compiling:$ac_tool_warned in
 yes:)
@@ -6814,7 +6821,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6863,7 +6870,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6895,7 +6902,7 @@ printf "%s\n" "no" >&6; }
 fi
 
   if test "x$ac_pt_CXX" = x; then
-    CXX="clang++"
+    CXX="notfound"
   else
     case $cross_compiling:$ac_tool_warned in
 yes:)
@@ -6924,7 +6931,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -6973,7 +6980,7 @@ else case e in #(
   ;;
   *)
   as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in notfound
+for as_dir in $PATH
 do
   IFS=$as_save_IFS
   case $as_dir in #(((
@@ -7005,7 +7012,7 @@ printf "%s\n" "no" >&6; }
 fi
 
   if test "x$ac_pt_CXX" = x; then
-    CXX="icpc"
+    CXX="notfound"
   else
     case $cross_compiling:$ac_tool_warned in
 yes:)
@@ -7209,6 +7216,18 @@ esac
 if test x$MULTIARCH != x; then
   MULTIARCH_CPPFLAGS="-DMULTIARCH=\\\"$MULTIARCH\\\""
 fi
+
+
+# Guess C stack direction
+case $host in #(
+  hppa*) :
+    _Py_STACK_GROWS_DOWN=0 ;; #(
+  *) :
+    _Py_STACK_GROWS_DOWN=1 ;;
+esac
+
+printf "%s\n" "#define _Py_STACK_GROWS_DOWN $_Py_STACK_GROWS_DOWN" >>confdefs.h
+
 
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for PEP 11 support tier" >&5
@@ -9036,7 +9055,100 @@ case "$ac_cv_cc_name" in
     fi
     ;;
   gcc)
+    # Check for 32-bit x86 ISA
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for i686" >&5
+printf %s "checking for i686... " >&6; }
+if test ${ac_cv_i686+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e)
+        cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+
+                #ifdef __i386__
+                #  error "i386"
+                #endif
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_i686=no
+else case e in #(
+  e) ac_cv_i686=yes ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+     ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_i686" >&5
+printf "%s\n" "$ac_cv_i686" >&6; }
+
     PGO_PROF_GEN_FLAG="-fprofile-generate"
+
+    # Use -fprofile-update=atomic to fix a random GCC internal error on PGO
+    # build (gh-145801) caused by corruption of profile data (.gcda files).
+    #
+    # gh-148535: On i686, using -fprofile-update=atomic makes the PGO build
+    # way slower (up to 47x slower). So far, the GCC internal error on PGO
+    # build was not seen on i686, so don't use this flag on i686.
+    if test "x$ac_cv_i686" = xno
+then :
+
+        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether C compiler accepts -fprofile-update=atomic" >&5
+printf %s "checking whether C compiler accepts -fprofile-update=atomic... " >&6; }
+if test ${ax_cv_check_cflags___fprofile_update_atomic+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e)
+  ax_check_save_flags=$CFLAGS
+  CFLAGS="$CFLAGS  -fprofile-update=atomic"
+  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ax_cv_check_cflags___fprofile_update_atomic=yes
+else case e in #(
+  e) ax_cv_check_cflags___fprofile_update_atomic=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+  CFLAGS=$ax_check_save_flags ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ax_cv_check_cflags___fprofile_update_atomic" >&5
+printf "%s\n" "$ax_cv_check_cflags___fprofile_update_atomic" >&6; }
+if test "x$ax_cv_check_cflags___fprofile_update_atomic" = xyes
+then :
+  PGO_PROF_GEN_FLAG="$PGO_PROF_GEN_FLAG -fprofile-update=atomic"
+else case e in #(
+  e) : ;;
+esac
+fi
+
+
+fi
+
     PGO_PROF_USE_FLAG="-fprofile-use -fprofile-correction"
     LLVM_PROF_MERGER="true"
     LLVM_PROF_FILE=""
@@ -9603,8 +9715,8 @@ fi
         as_fn_append LDFLAGS_NODIST " -sWASM_BIGINT"
 
         as_fn_append LINKFORSHARED " -sFORCE_FILESYSTEM -lidbfs.js -lnodefs.js -lproxyfs.js -lworkerfs.js"
-    as_fn_append LINKFORSHARED " -sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV,HEAPU32,TTY"
-    as_fn_append LINKFORSHARED " -sEXPORTED_FUNCTIONS=_main,_Py_Version,__PyRuntime,__PyEM_EMSCRIPTEN_COUNT_ARGS_OFFSET,_PyGILState_GetThisThreadState,__Py_DumpTraceback"
+    as_fn_append LINKFORSHARED " -sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV,HEAPU32,TTY,ERRNO_CODES"
+    as_fn_append LINKFORSHARED " -sEXPORTED_FUNCTIONS=_main,_Py_Version,__PyRuntime,_PyGILState_GetThisThreadState,__Py_DumpTraceback,__PyEM_EMSCRIPTEN_TRAMPOLINE_OFFSET"
     as_fn_append LINKFORSHARED " -sSTACK_SIZE=5MB"
         as_fn_append LINKFORSHARED " -sTEXTDECODER=2"
 
@@ -9679,6 +9791,65 @@ fi
   *) :
      ;;
 esac
+
+if test "$ac_sys_system" = "Linux" -a "$cross_compiling" = no; then
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for thread stack size" >&5
+printf %s "checking for thread stack size... " >&6; }
+if test ${ac_cv_thread_stack_size+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e)
+    cat > conftest.c <<EOF
+#include <pthread.h>
+
+int main()
+{
+    pthread_attr_t attrs;
+    size_t size;
+
+    int rc = pthread_attr_init(&attrs);
+    if (rc != 0) {
+        return 2;
+    }
+
+    rc = pthread_attr_getstacksize(&attrs, &size);
+    if (rc != 0) {
+        return 2;
+    }
+
+    if (size < 1024 * 1024) {
+        return 1;
+    }
+    return 0;
+}
+EOF
+
+    ac_cv_thread_stack_size=unknown
+    if $CC -pthread $CFLAGS conftest.c -o conftest &>/dev/null; then
+        ./conftest &>/dev/null
+        exitcode=$?
+        if test $exitcode -eq 1; then
+            ac_cv_thread_stack_size=1048576
+        elif test $exitcode -eq 0; then
+            ac_cv_thread_stack_size="default"
+        fi
+    fi
+    rm -f conftest.c conftest
+     ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_thread_stack_size" >&5
+printf "%s\n" "$ac_cv_thread_stack_size" >&6; }
+
+    if test "$ac_cv_thread_stack_size" != "default" -a "$ac_cv_thread_stack_size" != "unknown"; then
+        LDFLAGS="$LDFLAGS -Wl,-z,stack-size=$ac_cv_thread_stack_size"
+        # Stack size used by Python/ceval.c to set Py_C_STACK_SIZE
+
+printf "%s\n" "#define _Py_LINKER_THREAD_STACK_SIZE $ac_cv_thread_stack_size" >>confdefs.h
+
+    fi
+fi
 
 case $enable_wasm_dynamic_linking in #(
   yes) :
@@ -11593,6 +11764,12 @@ ac_fn_c_check_header_compile "$LINENO" "sys/syscall.h" "ac_cv_header_sys_syscall
 if test "x$ac_cv_header_sys_syscall_h" = xyes
 then :
   printf "%s\n" "#define HAVE_SYS_SYSCALL_H 1" >>confdefs.h
+
+fi
+ac_fn_c_check_header_compile "$LINENO" "sys/sysctl.h" "ac_cv_header_sys_sysctl_h" "$ac_includes_default"
+if test "x$ac_cv_header_sys_sysctl_h" = xyes
+then :
+  printf "%s\n" "#define HAVE_SYS_SYSCTL_H 1" >>confdefs.h
 
 fi
 ac_fn_c_check_header_compile "$LINENO" "sys/sysmacros.h" "ac_cv_header_sys_sysmacros_h" "$ac_includes_default"
@@ -14496,9 +14673,10 @@ then :
 
 fi
 
-# gh-124228: While the libuuid library is available on NetBSD, it supports only UUID version 4.
+# gh-124228: While the libuuid library is available on NetBSD and OpenBSD,
+# it supports only UUID version 4.
 # This restriction inhibits the proper generation of time-based UUIDs.
-if test "$ac_sys_system" = "NetBSD"; then
+if test "$ac_sys_system" = "NetBSD" || test "$ac_sys_system" = "OpenBSD"; then
   have_uuid=missing
   printf "%s\n" "#define HAVE_UUID_H 0" >>confdefs.h
 
@@ -17150,8 +17328,8 @@ int
 main (void)
 {
 
-      void *x1 = Tcl_Init;
-      void *x2 = Tk_Init;
+      Tcl_Init(NULL);
+      Tk_Init(NULL);
 
   ;
   return 0;
@@ -19051,15 +19229,27 @@ printf "%s\n" "#define WITH_DTRACE 1" >>confdefs.h
     # linked into the binary. Correspondingly, dtrace(1) is missing the ELF
     # generation flag '-G'. We check for presence of this flag, rather than
     # hardcoding support by OS, in the interest of robustness.
+    #
+    # NetBSD DTrace requires the -x nolibs flag to avoid system library conflicts
+    # and uses header generation for testing instead of object generation.
     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether DTrace probes require linking" >&5
 printf %s "checking whether DTrace probes require linking... " >&6; }
 if test ${ac_cv_dtrace_link+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
-  e)             ac_cv_dtrace_link=no
+  e)
+            ac_cv_dtrace_link=no
             echo 'BEGIN{}' > conftest.d
-            "$DTRACE" $DFLAGS -G -s conftest.d -o conftest.o > /dev/null 2>&1 && \
+            case $host in
+                *netbsd*)
+                    DTRACE_TEST_FLAGS="-x nolibs -h"
+                    ;;
+                *)
+                    DTRACE_TEST_FLAGS="-G"
+                    ;;
+            esac
+            "$DTRACE" $DFLAGS $DTRACE_TEST_FLAGS -s conftest.d -o conftest.o > /dev/null 2>&1 && \
                 ac_cv_dtrace_link=yes
        ;;
 esac
@@ -19069,6 +19259,12 @@ printf "%s\n" "$ac_cv_dtrace_link" >&6; }
     if test "$ac_cv_dtrace_link" = "yes"; then
         DTRACE_OBJS="Python/pydtrace.o"
     fi
+    # Set NetBSD-specific DTrace flags in DFLAGS
+    case $host in
+        *netbsd*)
+            DFLAGS="$DFLAGS -x nolibs"
+            ;;
+    esac
 fi
 
 PLATFORM_HEADERS=
@@ -19077,7 +19273,7 @@ PLATFORM_OBJS=
 case $ac_sys_system in #(
   Emscripten) :
 
-    as_fn_append PLATFORM_OBJS ' Python/emscripten_signal.o Python/emscripten_trampoline.o Python/emscripten_syscalls.o'
+    as_fn_append PLATFORM_OBJS ' Python/emscripten_signal.o Python/emscripten_trampoline.o Python/emscripten_trampoline_wasm.o Python/emscripten_syscalls.o'
     as_fn_append PLATFORM_HEADERS ' $(srcdir)/Include/internal/pycore_emscripten_signal.h $(srcdir)/Include/internal/pycore_emscripten_trampoline.h'
    ;; #(
   *) :
@@ -19096,6 +19292,15 @@ ac_fn_c_check_func "$LINENO" "dlopen" "ac_cv_func_dlopen"
 if test "x$ac_cv_func_dlopen" = xyes
 then :
   printf "%s\n" "#define HAVE_DLOPEN 1" >>confdefs.h
+
+fi
+
+
+# Used by ctypes.util.dllist().
+ac_fn_c_check_func "$LINENO" "dl_iterate_phdr" "ac_cv_func_dl_iterate_phdr"
+if test "x$ac_cv_func_dl_iterate_phdr" = xyes
+then :
+  printf "%s\n" "#define HAVE_DL_ITERATE_PHDR 1" >>confdefs.h
 
 fi
 
@@ -19249,12 +19454,6 @@ ac_fn_c_check_func "$LINENO" "dup" "ac_cv_func_dup"
 if test "x$ac_cv_func_dup" = xyes
 then :
   printf "%s\n" "#define HAVE_DUP 1" >>confdefs.h
-
-fi
-ac_fn_c_check_func "$LINENO" "dup3" "ac_cv_func_dup3"
-if test "x$ac_cv_func_dup3" = xyes
-then :
-  printf "%s\n" "#define HAVE_DUP3 1" >>confdefs.h
 
 fi
 ac_fn_c_check_func "$LINENO" "execv" "ac_cv_func_execv"
@@ -19731,12 +19930,6 @@ then :
   printf "%s\n" "#define HAVE_PIPE 1" >>confdefs.h
 
 fi
-ac_fn_c_check_func "$LINENO" "pipe2" "ac_cv_func_pipe2"
-if test "x$ac_cv_func_pipe2" = xyes
-then :
-  printf "%s\n" "#define HAVE_PIPE2 1" >>confdefs.h
-
-fi
 ac_fn_c_check_func "$LINENO" "plock" "ac_cv_func_plock"
 if test "x$ac_cv_func_plock" = xyes
 then :
@@ -20199,6 +20392,12 @@ then :
   printf "%s\n" "#define HAVE_SYSCONF 1" >>confdefs.h
 
 fi
+ac_fn_c_check_func "$LINENO" "sysctlbyname" "ac_cv_func_sysctlbyname"
+if test "x$ac_cv_func_sysctlbyname" = xyes
+then :
+  printf "%s\n" "#define HAVE_SYSCTLBYNAME 1" >>confdefs.h
+
+fi
 ac_fn_c_check_func "$LINENO" "tcgetpgrp" "ac_cv_func_tcgetpgrp"
 if test "x$ac_cv_func_tcgetpgrp" = xyes
 then :
@@ -20397,6 +20596,24 @@ ac_fn_c_check_func "$LINENO" "system" "ac_cv_func_system"
 if test "x$ac_cv_func_system" = xyes
 then :
   printf "%s\n" "#define HAVE_SYSTEM 1" >>confdefs.h
+
+fi
+
+fi
+# In addition, macOS introduced dup3 and pipe2 in macOS 27, late in the
+# lifetime of this version of Python. Rather than adding weaklinking
+# support for them, just continue to ignore them.
+if test "$ac_sys_system" != "iOS" -a "$ac_sys_system" != "Darwin"; then
+  ac_fn_c_check_func "$LINENO" "dup3" "ac_cv_func_dup3"
+if test "x$ac_cv_func_dup3" = xyes
+then :
+  printf "%s\n" "#define HAVE_DUP3 1" >>confdefs.h
+
+fi
+ac_fn_c_check_func "$LINENO" "pipe2" "ac_cv_func_pipe2"
+if test "x$ac_cv_func_pipe2" = xyes
+then :
+  printf "%s\n" "#define HAVE_PIPE2 1" >>confdefs.h
 
 fi
 
@@ -25979,8 +26196,8 @@ main (void)
 {
 
   unsigned int fpcr;
-  __asm__ __volatile__ ("fmove.l %%fpcr,%0" : "=g" (fpcr));
-  __asm__ __volatile__ ("fmove.l %0,%%fpcr" : : "g" (fpcr));
+  __asm__ __volatile__ ("fmove.l %%fpcr,%0" : "=dm" (fpcr));
+  __asm__ __volatile__ ("fmove.l %0,%%fpcr" : : "dm" (fpcr));
 
   ;
   return 0;
@@ -26763,18 +26980,21 @@ LDVERSION='$(VERSION)$(ABIFLAGS)'
 printf "%s\n" "$LDVERSION" >&6; }
 
 # Configure the flags and dependencies used when compiling shared modules.
-# Do not rename LIBPYTHON - it's accessed via sysconfig by package build
-# systems (e.g. Meson) to decide whether to link extension modules against
-# libpython.
 
 
 MODULE_DEPS_SHARED='$(MODULE_DEPS_STATIC) $(EXPORTSYMS)'
+
+# On most platforms, extension modules aren't linked against libpython, so
+# LIBPYTHON must be empty.
 LIBPYTHON=''
 
 # On Android and Cygwin the shared libraries must be linked with libpython.
+# LIBPYTHON is used by python-config, python3.pc, the commands for building the
+# stdlib's own extension modules, and external package build systems via
+# sysconfig, so its value must be suitable for all those contexts.
 if test "$PY_ENABLE_SHARED" = "1" && ( test -n "$ANDROID_API_LEVEL" || test "$MACHDEP" = "cygwin"); then
   MODULE_DEPS_SHARED="$MODULE_DEPS_SHARED \$(LDLIBRARY)"
-  LIBPYTHON="\$(BLDLIBRARY)"
+  LIBPYTHON="-lpython${VERSION}${ABIFLAGS}"
 fi
 
 # On iOS the shared libraries must be linked with the Python framework
@@ -28186,110 +28406,6 @@ printf "%s\n" "#define HAVE_STAT_TV_NSEC2 1" >>confdefs.h
 
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether year with century should be normalized for strftime" >&5
-printf %s "checking whether year with century should be normalized for strftime... " >&6; }
-if test ${ac_cv_normalize_century+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e)
-if test "$cross_compiling" = yes
-then :
-  ac_cv_normalize_century=yes
-else case e in #(
-  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
-/* end confdefs.h.  */
-
-#include <time.h>
-#include <string.h>
-
-int main(void)
-{
-  char year[5];
-  struct tm date = {
-    .tm_year = -1801,
-    .tm_mon = 0,
-    .tm_mday = 1
-  };
-  if (strftime(year, sizeof(year), "%Y", &date) && !strcmp(year, "0099")) {
-    return 1;
-  }
-  return 0;
-}
-
-_ACEOF
-if ac_fn_c_try_run "$LINENO"
-then :
-  ac_cv_normalize_century=yes
-else case e in #(
-  e) ac_cv_normalize_century=no ;;
-esac
-fi
-rm -f core *.core core.conftest.* gmon.out bb.out conftest$ac_exeext \
-  conftest.$ac_objext conftest.beam conftest.$ac_ext ;;
-esac
-fi
- ;;
-esac
-fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_normalize_century" >&5
-printf "%s\n" "$ac_cv_normalize_century" >&6; }
-if test "$ac_cv_normalize_century" = yes
-then
-
-printf "%s\n" "#define _Py_NORMALIZE_CENTURY 1" >>confdefs.h
-
-fi
-
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether C99-compatible strftime specifiers are supported" >&5
-printf %s "checking whether C99-compatible strftime specifiers are supported... " >&6; }
-if test ${ac_cv_strftime_c99_support+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e)
-if test "$cross_compiling" = yes
-then :
-  ac_cv_strftime_c99_support=
-else case e in #(
-  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
-/* end confdefs.h.  */
-
-#include <time.h>
-#include <string.h>
-
-int main(void)
-{
-  char full_date[11];
-  struct tm date = {
-    .tm_year = 0,
-    .tm_mon = 0,
-    .tm_mday = 1
-  };
-  if (strftime(full_date, sizeof(full_date), "%F", &date) && !strcmp(full_date, "1900-01-01")) {
-    return 0;
-  }
-  return 1;
-}
-
-_ACEOF
-if ac_fn_c_try_run "$LINENO"
-then :
-  ac_cv_strftime_c99_support=yes
-else case e in #(
-  e) as_fn_error $? "Python requires C99-compatible strftime specifiers" "$LINENO" 5 ;;
-esac
-fi
-rm -f core *.core core.conftest.* gmon.out bb.out conftest$ac_exeext \
-  conftest.$ac_objext conftest.beam conftest.$ac_ext ;;
-esac
-fi
- ;;
-esac
-fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_strftime_c99_support" >&5
-printf "%s\n" "$ac_cv_strftime_c99_support" >&6; }
-
 have_curses=no
 have_panel=no
 
@@ -28669,8 +28785,9 @@ fi
 
 
   # Check that we're able to link with crucial curses/panel functions. This
-  # also serves as a fallback in case pkg-config failed.
-  as_fn_append LIBS " $CURSES_LIBS $PANEL_LIBS"
+  # also serves as a fallback in case pkg-config failed. Extension modules are
+  # not linked with LIBS, so exclude it to get the required libraries.
+  LIBS="$CURSES_LIBS $PANEL_LIBS"
   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for library containing initscr" >&5
 printf %s "checking for library containing initscr... " >&6; }
 if test ${ac_cv_search_initscr+y}
@@ -28837,6 +28954,72 @@ fi
 
 PANEL_CFLAGS=$(echo $PANEL_CFLAGS | sed 's/-D_XOPEN_SOURCE=600//g')
 
+if test "x$have_curses" = xno
+then :
+
+else case e in #(
+  e)
+          save_curses_cppflags=$CPPFLAGS
+  as_fn_append CPPFLAGS " $CURSES_CFLAGS"
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether curses supports wide characters" >&5
+printf %s "checking whether curses supports wide characters... " >&6; }
+if test ${ac_cv_curses_wide+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+
+        cchar_t wcval;
+        setcchar(&wcval, L"x", A_NORMAL, 0, NULL);
+        add_wch(&wcval);
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_curses_wide=yes
+else case e in #(
+  e) ac_cv_curses_wide=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_curses_wide" >&5
+printf "%s\n" "$ac_cv_curses_wide" >&6; }
+  CPPFLAGS=$save_curses_cppflags
+      if test "x$ac_cv_curses_wide" = xyes
+then :
+  printf "%s\n" "#define HAVE_NCURSESW 1" >>confdefs.h
+
+fi
+ ;;
+esac
+fi
+
 # On Solaris, term.h requires curses.h
 ac_fn_c_check_header_compile "$LINENO" "term.h" "ac_cv_header_term_h" "
 #define NCURSES_OPAQUE 0
@@ -28973,6 +29156,8 @@ then
 printf "%s\n" "#define WINDOW_HAS_FLAGS 1" >>confdefs.h
 
 fi
+
+
 
 
 
@@ -29636,6 +29821,293 @@ fi
 
 
 
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curses function set_escdelay" >&5
+printf %s "checking for curses function set_escdelay... " >&6; }
+if test ${ac_cv_lib_curses_set_escdelay+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+
+        #ifndef set_escdelay
+        void *x=set_escdelay
+        #endif
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_lib_curses_set_escdelay=yes
+else case e in #(
+  e) ac_cv_lib_curses_set_escdelay=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+   ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curses_set_escdelay" >&5
+printf "%s\n" "$ac_cv_lib_curses_set_escdelay" >&6; }
+  if test "x$ac_cv_lib_curses_set_escdelay" = xyes
+then :
+
+printf "%s\n" "#define HAVE_CURSES_SET_ESCDELAY 1" >>confdefs.h
+
+fi
+
+
+
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curses function set_tabsize" >&5
+printf %s "checking for curses function set_tabsize... " >&6; }
+if test ${ac_cv_lib_curses_set_tabsize+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+
+        #ifndef set_tabsize
+        void *x=set_tabsize
+        #endif
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_lib_curses_set_tabsize=yes
+else case e in #(
+  e) ac_cv_lib_curses_set_tabsize=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+   ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curses_set_tabsize" >&5
+printf "%s\n" "$ac_cv_lib_curses_set_tabsize" >&6; }
+  if test "x$ac_cv_lib_curses_set_tabsize" = xyes
+then :
+
+printf "%s\n" "#define HAVE_CURSES_SET_TABSIZE 1" >>confdefs.h
+
+fi
+
+
+
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curses variable ESCDELAY" >&5
+printf %s "checking for curses variable ESCDELAY... " >&6; }
+if test ${ac_cv_lib_curses_ESCDELAY+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+
+        int x = ESCDELAY; (void)x;
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_lib_curses_ESCDELAY=yes
+else case e in #(
+  e) ac_cv_lib_curses_ESCDELAY=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+   ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curses_ESCDELAY" >&5
+printf "%s\n" "$ac_cv_lib_curses_ESCDELAY" >&6; }
+  if test "x$ac_cv_lib_curses_ESCDELAY" = xyes
+then :
+
+printf "%s\n" "#define HAVE_CURSES_ESCDELAY 1" >>confdefs.h
+
+fi
+
+
+
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curses variable TABSIZE" >&5
+printf %s "checking for curses variable TABSIZE... " >&6; }
+if test ${ac_cv_lib_curses_TABSIZE+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+
+        int x = TABSIZE; (void)x;
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_lib_curses_TABSIZE=yes
+else case e in #(
+  e) ac_cv_lib_curses_TABSIZE=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+   ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curses_TABSIZE" >&5
+printf "%s\n" "$ac_cv_lib_curses_TABSIZE" >&6; }
+  if test "x$ac_cv_lib_curses_TABSIZE" = xyes
+then :
+
+printf "%s\n" "#define HAVE_CURSES_TABSIZE 1" >>confdefs.h
+
+fi
+
+
+
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for ncurses-style curses function getmouse" >&5
+printf %s "checking for ncurses-style curses function getmouse... " >&6; }
+if test ${ac_cv_lib_curses_getmouse+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#define NCURSES_OPAQUE 0
+#if defined(HAVE_NCURSESW_NCURSES_H)
+#  include <ncursesw/ncurses.h>
+#elif defined(HAVE_NCURSESW_CURSES_H)
+#  include <ncursesw/curses.h>
+#elif defined(HAVE_NCURSES_NCURSES_H)
+#  include <ncurses/ncurses.h>
+#elif defined(HAVE_NCURSES_CURSES_H)
+#  include <ncurses/curses.h>
+#elif defined(HAVE_NCURSES_H)
+#  include <ncurses.h>
+#elif defined(HAVE_CURSES_H)
+#  include <curses.h>
+#endif
+
+int
+main (void)
+{
+MEVENT event; (void)getmouse(&event);
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  ac_cv_lib_curses_getmouse=yes
+else case e in #(
+  e) ac_cv_lib_curses_getmouse=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curses_getmouse" >&5
+printf "%s\n" "$ac_cv_lib_curses_getmouse" >&6; }
+if test "x$ac_cv_lib_curses_getmouse" = xyes
+then :
+
+printf "%s\n" "#define HAVE_CURSES_GETMOUSE 1" >>confdefs.h
+
+fi
 CPPFLAGS=$ac_save_cppflags
 
 fi
@@ -30081,6 +30553,52 @@ if test "$have_glibc_memmove_bug" = yes; then
 printf "%s\n" "#define HAVE_GLIBC_MEMMOVE_BUG 1" >>confdefs.h
 
 fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking if we need to manually block large inlining in ceval.c" >&5
+printf %s "checking if we need to manually block large inlining in ceval.c... " >&6; }
+if test "$cross_compiling" = yes
+then :
+  block_huge_inlining_in_ceval=undefined
+else case e in #(
+  e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int main(void) {
+// See gh-148284: Clang 22 seems to have interactions with inlining
+// and the stackref buffer which cause 40 kB of stack usage on x86-64
+// in buggy versions of _PyEval_EvalFrameDefault() in computed goto
+// interpreter. The normal usage seen is normally 1-2 kB.
+#if defined(__clang__) && (__clang_major__ == 22)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+_ACEOF
+if ac_fn_c_try_run "$LINENO"
+then :
+  block_huge_inlining_in_ceval=no
+else case e in #(
+  e) block_huge_inlining_in_ceval=yes ;;
+esac
+fi
+rm -f core *.core core.conftest.* gmon.out bb.out conftest$ac_exeext \
+  conftest.$ac_objext conftest.beam conftest.$ac_ext ;;
+esac
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $block_huge_inlining_in_ceval" >&5
+printf "%s\n" "$block_huge_inlining_in_ceval" >&6; }
+
+if test "$block_huge_inlining_in_ceval" = yes && test "$ac_cv_computed_gotos" = yes; then
+    # gh-148284: Suppress inlining of functions whose stack size exceeds
+    # 512 bytes. This number should be tuned to follow the C stack
+    # consumption in _PyEval_EvalFrameDefault() on computed goto
+    # interpreter.
+    CFLAGS_CEVAL="$CFLAGS_CEVAL -finline-max-stacksize=512"
+fi
+
 
 if test "$ac_cv_gcc_asm_for_x87" = yes; then
     # Some versions of gcc miscompile inline asm:
@@ -32744,7 +33262,7 @@ fi
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for HACL* library linking type" >&5
 printf %s "checking for HACL* library linking type... " >&6; }
-if test "$ac_sys_system" = "WASI"; then
+if test "$ac_sys_system" = "WASI" || test "$MODULE_BUILDTYPE" = "static"; then
   LIBHACL_LDEPS_LIBTYPE=STATIC
   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: static" >&5
 printf "%s\n" "static" >&6; }
@@ -34164,8 +34682,8 @@ fi
   if test "x$py_cv_module__ctypes_test" = xyes
 then :
 
-    as_fn_append MODULE_BLOCK "MODULE__CTYPES_TEST_CFLAGS=$LIBFFI_CFLAGS$as_nl"
-    as_fn_append MODULE_BLOCK "MODULE__CTYPES_TEST_LDFLAGS=$LIBFFI_LIBS $LIBM$as_nl"
+
+    as_fn_append MODULE_BLOCK "MODULE__CTYPES_TEST_LDFLAGS=$LIBM$as_nl"
 
 fi
    if test "$py_cv_module__ctypes_test" = yes; then
@@ -35303,7 +35821,7 @@ do
     "Mac/PythonLauncher/Makefile") CONFIG_FILES="$CONFIG_FILES Mac/PythonLauncher/Makefile" ;;
     "Mac/Resources/framework/Info.plist") CONFIG_FILES="$CONFIG_FILES Mac/Resources/framework/Info.plist" ;;
     "Mac/Resources/app/Info.plist") CONFIG_FILES="$CONFIG_FILES Mac/Resources/app/Info.plist" ;;
-    "iOS/Resources/Info.plist") CONFIG_FILES="$CONFIG_FILES iOS/Resources/Info.plist" ;;
+    "Apple/iOS/Resources/Info.plist") CONFIG_FILES="$CONFIG_FILES Apple/iOS/Resources/Info.plist" ;;
     "Makefile.pre") CONFIG_FILES="$CONFIG_FILES Makefile.pre" ;;
     "Misc/python.pc") CONFIG_FILES="$CONFIG_FILES Misc/python.pc" ;;
     "Misc/python-embed.pc") CONFIG_FILES="$CONFIG_FILES Misc/python-embed.pc" ;;

@@ -2,7 +2,7 @@
 
 
 ====================
-Coroutines and Tasks
+Coroutines and tasks
 ====================
 
 This section outlines high-level asyncio APIs to work with coroutines
@@ -231,7 +231,7 @@ A good example of a low-level function that returns a Future object
 is :meth:`loop.run_in_executor`.
 
 
-Creating Tasks
+Creating tasks
 ==============
 
 **Source code:** :source:`Lib/asyncio/tasks.py`
@@ -288,6 +288,17 @@ Creating Tasks
               # completion:
               task.add_done_callback(background_tasks.discard)
 
+      Note that this approach never awaits the tasks, so if a task
+      fails, its exception is never retrieved and asyncio logs a
+      "Task exception was never retrieved" message when the task is
+      garbage collected.  To avoid this, use :class:`asyncio.TaskGroup`
+      which keeps a strong reference to each task, awaits them and
+      propagates their exceptions::
+
+          async with asyncio.TaskGroup() as tg:
+              for i in range(10):
+                  tg.create_task(some_coro(param=i))
+
    .. versionadded:: 3.7
 
    .. versionchanged:: 3.8
@@ -300,7 +311,7 @@ Creating Tasks
       Added the *eager_start* parameter by passing on all *kwargs*.
 
 
-Task Cancellation
+Task cancellation
 =================
 
 Tasks can easily and safely be cancelled.
@@ -324,7 +335,7 @@ remove the cancellation state.
 
 .. _taskgroups:
 
-Task Groups
+Task groups
 ===========
 
 Task groups combine a task creation API with a convenient
@@ -345,7 +356,7 @@ and reliable way to wait for all tasks in the group to finish.
       The signature matches that of :func:`asyncio.create_task`.
       If the task group is inactive (e.g. not yet entered,
       already finished, or in the process of shutting down),
-      we will close the given ``coro``.
+      we will close the given ``coro`` and raise :exc:`RuntimeError`.
 
       .. versionchanged:: 3.13
 
@@ -427,7 +438,7 @@ reported by :meth:`asyncio.Task.cancelling`.
    Improved handling of simultaneous internal and external cancellations
    and correct preservation of cancellation counts.
 
-Terminating a Task Group
+Terminating a task group
 ------------------------
 
 While terminating a task group is not natively supported by the standard
@@ -498,13 +509,13 @@ Sleeping
    for 5 seconds::
 
     import asyncio
-    import datetime
+    import datetime as dt
 
     async def display_date():
         loop = asyncio.get_running_loop()
         end_time = loop.time() + 5.0
         while True:
-            print(datetime.datetime.now())
+            print(dt.datetime.now())
             if (loop.time() + 1.0) >= end_time:
                 break
             await asyncio.sleep(1)
@@ -519,7 +530,7 @@ Sleeping
       Raises :exc:`ValueError` if *delay* is :data:`~math.nan`.
 
 
-Running Tasks Concurrently
+Running tasks concurrently
 ==========================
 
 .. awaitablefunction:: gather(*aws, return_exceptions=False)
@@ -557,7 +568,7 @@ Running Tasks Concurrently
       provides stronger safety guarantees than *gather* for scheduling a nesting of subtasks:
       if a task (or a subtask, a task scheduled by a task)
       raises an exception, *TaskGroup* will, while *gather* will not,
-      cancel the remaining scheduled tasks).
+      cancel the remaining scheduled tasks.
 
    .. _asyncio_example_gather:
 
@@ -621,7 +632,7 @@ Running Tasks Concurrently
 
 .. _eager-task-factory:
 
-Eager Task Factory
+Eager task factory
 ==================
 
 .. function:: eager_task_factory(loop, coro, *, name=None, context=None)
@@ -664,7 +675,7 @@ Eager Task Factory
     .. versionadded:: 3.12
 
 
-Shielding From Cancellation
+Shielding from cancellation
 ===========================
 
 .. awaitablefunction:: shield(aw)
@@ -771,6 +782,9 @@ Timeouts
        An :ref:`asynchronous context manager <async-context-managers>`
        for cancelling overdue coroutines.
 
+       Prefer using :func:`asyncio.timeout` or :func:`asyncio.timeout_at`
+       rather than instantiating :class:`!Timeout` directly.
+
        ``when`` should be an absolute time at which the context should time out,
        as measured by the event loop's clock:
 
@@ -839,17 +853,13 @@ Timeouts
    Wait for the *aw* :ref:`awaitable <asyncio-awaitables>`
    to complete with a timeout.
 
-   If *aw* is a coroutine it is automatically scheduled as a Task.
-
    *timeout* can either be ``None`` or a float or int number of seconds
    to wait for.  If *timeout* is ``None``, block until the future
    completes.
 
-   If a timeout occurs, it cancels the task and raises
-   :exc:`TimeoutError`.
+   If a timeout occurs, it cancels *aw* and raises :exc:`TimeoutError`.
 
-   To avoid the task :meth:`cancellation <Task.cancel>`,
-   wrap it in :func:`shield`.
+   To prevent *aw* from being cancelled, wrap it in :func:`shield`.
 
    The function will wait until the future is actually cancelled,
    so the total wait time may exceed the *timeout*. If an exception
@@ -890,8 +900,12 @@ Timeouts
    .. versionchanged:: 3.11
       Raises :exc:`TimeoutError` instead of :exc:`asyncio.TimeoutError`.
 
+   .. versionchanged:: 3.12
+      Implemented using :func:`asyncio.timeout`, a coroutine passed as *aw*
+      is no longer wrapped in a :class:`Task` when *timeout* is positive.
 
-Waiting Primitives
+
+Waiting primitives
 ==================
 
 .. function:: wait(aws, *, timeout=None, return_when=ALL_COMPLETED)
@@ -938,6 +952,9 @@ Waiting Primitives
 
    Unlike :func:`~asyncio.wait_for`, ``wait()`` does not cancel the
    futures when a timeout occurs.
+
+   If ``wait()`` is cancelled, the futures in *aws* are not cancelled
+   and continue to run.
 
    .. versionchanged:: 3.10
       Removed the *loop* parameter.
@@ -996,6 +1013,10 @@ Waiting Primitives
    are done. This is raised by the ``async for`` loop during asynchronous
    iteration or by the coroutines yielded during plain iteration.
 
+   ``as_completed()`` does not cancel the tasks running the supplied
+   awaitables: if a timeout occurs or the iteration is cancelled, the
+   remaining tasks continue to run.
+
    .. versionchanged:: 3.10
       Removed the *loop* parameter.
 
@@ -1011,7 +1032,7 @@ Waiting Primitives
       or as a plain :term:`iterator` (previously it was only a plain iterator).
 
 
-Running in Threads
+Running in threads
 ==================
 
 .. function:: to_thread(func, /, *args, **kwargs)
@@ -1071,7 +1092,7 @@ Running in Threads
    .. versionadded:: 3.9
 
 
-Scheduling From Other Threads
+Scheduling from other threads
 =============================
 
 .. function:: run_coroutine_threadsafe(coro, loop)
@@ -1193,8 +1214,9 @@ Introspection
 
    .. versionadded:: 3.4
 
+.. _asyncio-task-obj:
 
-Task Object
+Task object
 ===========
 
 .. class:: Task(coro, *, loop=None, name=None, context=None, eager_start=False)
@@ -1243,6 +1265,9 @@ Task Object
    executing the coroutine immediately, until the first time the coroutine
    blocks. If the coroutine returns or raises without blocking, the task
    will be finished eagerly and will skip scheduling to the event loop.
+
+   Tasks are :ref:`generic <generics>` over the return type of their wrapped
+   coroutines.
 
    .. versionchanged:: 3.7
       Added support for the :mod:`contextvars` module.

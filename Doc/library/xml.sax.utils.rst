@@ -11,7 +11,7 @@
 
 --------------
 
-The module :mod:`xml.sax.saxutils` contains a number of classes and functions
+The module :mod:`!xml.sax.saxutils` contains a number of classes and functions
 that are commonly useful when creating SAX applications, either in direct use,
 or as base classes.
 
@@ -37,7 +37,7 @@ or as base classes.
 
    You can unescape other strings of data by passing a dictionary as the optional
    *entities* parameter.  The keys and values must all be strings; each key will be
-   replaced with its corresponding value.  ``'&amp'``, ``'&lt;'``, and ``'&gt;'``
+   replaced with its corresponding value.  ``'&amp;'``, ``'&lt;'``, and ``'&gt;'``
    are always unescaped, even if *entities* is provided.
 
 
@@ -83,6 +83,15 @@ or as base classes.
    to the reader and events on to the handlers unmodified, but subclasses can
    override specific methods to modify the event stream or the configuration
    requests as they pass through.
+
+   .. method:: getParent()
+
+      Return the parent reader, or ``None`` if it is not set.
+
+
+   .. method:: setParent(parent)
+
+      Set the parent reader, which the events are read from.
 
 
 .. function:: prepare_input_source(source, base='')

@@ -261,6 +261,12 @@ readonly, format
       MUST be consistent for all consumers. For example, :c:expr:`PyBUF_SIMPLE | PyBUF_WRITABLE`
       can be used to request a simple writable buffer.
 
+   .. c:macro:: PyBUF_WRITEABLE
+
+      This is an alias to :c:macro:`PyBUF_WRITABLE`.
+
+      .. soft-deprecated:: 3.13
+
    .. c:macro:: PyBUF_FORMAT
 
       Controls the :c:member:`~Py_buffer.format` field. If set, this field MUST

@@ -121,7 +121,7 @@ Extending :class:`JSONEncoder`::
     ['[2.0', ', 1.0', ']']
 
 
-Using :mod:`json` from the shell to validate and pretty-print:
+Using :mod:`!json` from the shell to validate and pretty-print:
 
 .. code-block:: shell-session
 
@@ -183,8 +183,10 @@ Basic Usage
 
    :param bool ensure_ascii:
       If ``True`` (the default), the output is guaranteed to
-      have all incoming non-ASCII characters escaped.
-      If ``False``, these characters will be outputted as-is.
+      have all incoming non-ASCII and non-printable characters escaped.
+      If ``False``, all characters will be outputted as-is, except for
+      the characters that must be escaped: quotation mark, reverse solidus,
+      and the control characters U+0000 through U+001F.
 
    :param bool check_circular:
       If ``False``, the circular reference check for container types is skipped
@@ -212,7 +214,7 @@ Basic Usage
       a string (such as ``"\t"``) is used to indent each level.
       If zero, negative, or ``""`` (the empty string),
       only newlines are inserted.
-      If ``None`` (the default), the most compact representation is used.
+      If ``None`` (the default), no newlines are inserted.
    :type indent: int | str | None
 
    :param separators:
@@ -235,6 +237,16 @@ Basic Usage
       If ``True``, dictionaries will be outputted sorted by key.
       Default ``False``.
 
+   .. note::
+
+      Keys in key/value pairs of JSON are always of the type :class:`str`. When
+      a dictionary is converted into JSON, all the keys of the dictionary are
+      converted to strings. As a result of this, if a dictionary is converted
+      into JSON and then back into a dictionary, the dictionary may not equal
+      the original one. That is, ``loads(dumps(x)) != x`` if x has non-string
+      keys. *sort_keys* sorts the keys before they are converted to strings,
+      so numeric keys are sorted by value, not by their string representation.
+
    .. versionchanged:: 3.2
       Allow strings for *indent* in addition to integers.
 
@@ -253,15 +265,6 @@ Basic Usage
    Serialize *obj* to a JSON formatted :class:`str` using this :ref:`conversion
    table <py-to-json-table>`.  The arguments have the same meaning as in
    :func:`dump`.
-
-   .. note::
-
-      Keys in key/value pairs of JSON are always of the type :class:`str`. When
-      a dictionary is converted into JSON, all the keys of the dictionary are
-      coerced to strings. As a result of this, if a dictionary is converted
-      into JSON and then back into a dictionary, the dictionary may not equal
-      the original one. That is, ``loads(dumps(x)) != x`` if x has non-string
-      keys.
 
 .. function:: load(fp, *, cls=None, object_hook=None, parse_float=None, \
                    parse_int=None, parse_constant=None, \
@@ -495,8 +498,10 @@ Encoders and Decoders
    :class:`bool` or ``None``.  If *skipkeys* is true, such items are simply skipped.
 
    If *ensure_ascii* is true (the default), the output is guaranteed to
-   have all incoming non-ASCII characters escaped.  If *ensure_ascii* is
-   false, these characters will be output as-is.
+   have all incoming non-ASCII and non-printable characters escaped.
+   If *ensure_ascii* is false, all characters will be output as-is, except for
+   the characters that must be escaped: quotation mark, reverse solidus,
+   and the control characters U+0000 through U+001F.
 
    If *check_circular* is true (the default), then lists, dicts, and custom
    encoded objects will be checked for circular references during encoding to
@@ -636,7 +641,7 @@ UTF-32, with UTF-8 being the recommended default for maximum interoperability.
 
 As permitted, though not required, by the RFC, this module's serializer sets
 *ensure_ascii=True* by default, thus escaping the output so that the resulting
-strings only contain ASCII characters.
+strings only contain printable ASCII characters.
 
 Other than the *ensure_ascii* parameter, this module is defined strictly in
 terms of conversion between Python objects and
@@ -743,8 +748,8 @@ Command-line interface
 
 --------------
 
-The :mod:`json` module can be invoked as a script via ``python -m json``
-to validate and pretty-print JSON objects. The :mod:`json.tool` submodule
+The :mod:`!json` module can be invoked as a script via ``python -m json``
+to validate and pretty-print JSON objects. The :mod:`!json.tool` submodule
 implements this interface.
 
 If the optional ``infile`` and ``outfile`` arguments are not
@@ -765,7 +770,7 @@ specified, :data:`sys.stdin` and :data:`sys.stdout` will be used respectively:
    alphabetically by key.
 
 .. versionchanged:: 3.14
-   The :mod:`json` module may now be directly executed as
+   The :mod:`!json` module may now be directly executed as
    ``python -m json``. For backwards compatibility, invoking
    the CLI as ``python -m json.tool`` remains supported.
 

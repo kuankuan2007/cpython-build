@@ -609,6 +609,7 @@ check_missing___main___attr(PyObject *exc)
     // Get the error message.
     PyObject *args = PyException_GetArgs(exc);
     if (args == NULL || args == Py_None || PyObject_Size(args) < 1) {
+        Py_XDECREF(args);
         assert(!PyErr_Occurred());
         return 0;
     }
@@ -1038,7 +1039,7 @@ _PyXIData_ReleaseAndRawFree(_PyXIData_t *xidata)
 /* convenience utilities */
 /*************************/
 
-static const char *
+static char *
 _copy_string_obj_raw(PyObject *strobj, Py_ssize_t *p_size)
 {
     Py_ssize_t size = -1;
@@ -1139,11 +1140,16 @@ _format_TracebackException(PyObject *tbexc)
     }
 
     Py_ssize_t size = -1;
-    const char *formatted = _copy_string_obj_raw(formatted_obj, &size);
+    char *formatted = _copy_string_obj_raw(formatted_obj, &size);
     Py_DECREF(formatted_obj);
-    // We remove trailing the newline added by TracebackException.format().
-    assert(formatted[size-1] == '\n');
-    ((char *)formatted)[size-1] = '\0';
+    if (formatted == NULL || size == 0) {
+        return formatted;
+    }
+    assert(formatted[size] == '\0');
+    // Remove a trailing newline if needed.
+    if (formatted[size-1] == '\n') {
+        formatted[size-1] = '\0';
+    }
     return formatted;
 }
 
@@ -1153,8 +1159,8 @@ _release_xid_data(_PyXIData_t *xidata, int rawfree)
 {
     PyObject *exc = PyErr_GetRaisedException();
     int res = rawfree
-        ? _PyXIData_Release(xidata)
-        : _PyXIData_ReleaseAndRawFree(xidata);
+        ? _PyXIData_ReleaseAndRawFree(xidata)
+        : _PyXIData_Release(xidata);
     if (res < 0) {
         /* The owning interpreter is already destroyed. */
         _PyXIData_Clear(NULL, xidata);
@@ -1642,6 +1648,7 @@ _PyXI_NewExcInfo(PyObject *exc)
     }
     _PyXI_excinfo *info = PyMem_RawCalloc(1, sizeof(_PyXI_excinfo));
     if (info == NULL) {
+        PyErr_NoMemory();
         return NULL;
     }
     const char *failure;
@@ -1662,6 +1669,7 @@ _PyXI_NewExcInfo(PyObject *exc)
 void
 _PyXI_FreeExcInfo(_PyXI_excinfo *info)
 {
+    assert(info != NULL);
     _PyXI_excinfo_clear(info);
     PyMem_RawFree(info);
 }
@@ -1805,6 +1813,15 @@ _PyXI_InitFailureUTF8(_PyXI_failure *failure,
 int
 _PyXI_InitFailure(_PyXI_failure *failure, _PyXI_errcode code, PyObject *obj)
 {
+    *failure = (_PyXI_failure){
+        .code = code,
+        .msg = NULL,
+        .msg_owned = 0,
+    };
+    if (obj == NULL) {
+        return 0;
+    }
+
     PyObject *msgobj = PyObject_Str(obj);
     if (msgobj == NULL) {
         return -1;
@@ -1813,7 +1830,7 @@ _PyXI_InitFailure(_PyXI_failure *failure, _PyXI_errcode code, PyObject *obj)
     // That happens automatically in _capture_current_exception().
     const char *msg = _copy_string_obj_raw(msgobj, NULL);
     Py_DECREF(msgobj);
-    if (PyErr_Occurred()) {
+    if (msg == NULL) {
         return -1;
     }
     *failure = (_PyXI_failure){
@@ -2950,7 +2967,7 @@ _pop_preserved(_PyXI_session *session,
         *p_xidata = NULL;
     }
     else {
-        _PyXI_namespace *xidata = _create_sharedns(session->_preserved);
+        xidata = _create_sharedns(session->_preserved);
         if (xidata == NULL) {
             failure.code = _PyXI_ERR_PRESERVE_FAILURE;
             goto error;

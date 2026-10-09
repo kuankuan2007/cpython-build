@@ -6,6 +6,7 @@
 #include "pycore_intrinsics.h"
 #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
 #include "pycore_long.h"          // _PY_IS_SMALL_INT()
+#include "pycore_hashtable.h"     // _Py_hashtable_t
 
 #include "pycore_opcode_utils.h"
 #include "pycore_opcode_metadata.h" // OPCODE_HAS_ARG, etc
@@ -391,7 +392,6 @@ cfg_builder_maybe_start_new_block(cfg_builder *g)
 static bool
 cfg_builder_check(cfg_builder *g)
 {
-    assert(g->g_entryblock->b_iused > 0);
     for (basicblock *block = g->g_block_list; block != NULL; block = block->b_list) {
         assert(!_PyMem_IsPtrFreed(block));
         if (block->b_instr != NULL) {
@@ -1295,6 +1295,14 @@ get_const_value(int opcode, int oparg, PyObject *co_consts)
     PyObject *constant = NULL;
     assert(loads_const(opcode));
     if (opcode == LOAD_CONST) {
+        assert(PyList_Check(co_consts));
+        Py_ssize_t n = PyList_GET_SIZE(co_consts);
+        if (oparg < 0 || oparg >= n) {
+            PyErr_Format(PyExc_ValueError,
+                         "LOAD_CONST index %d is out of range for consts (len=%zd)",
+                         oparg, n);
+            return NULL;
+        }
         constant = PyList_GET_ITEM(co_consts, oparg);
     }
     if (opcode == LOAD_SMALL_INT) {
@@ -1311,30 +1319,38 @@ get_const_value(int opcode, int oparg, PyObject *co_consts)
 
 // Steals a reference to newconst.
 static int
-add_const(PyObject *newconst, PyObject *consts, PyObject *const_cache)
+add_const(PyObject *newconst, PyObject *consts, PyObject *const_cache,
+          _Py_hashtable_t *consts_index)
 {
     if (_PyCompile_ConstCacheMergeOne(const_cache, &newconst) < 0) {
         Py_DECREF(newconst);
         return -1;
     }
 
-    Py_ssize_t index;
-    for (index = 0; index < PyList_GET_SIZE(consts); index++) {
-        if (PyList_GET_ITEM(consts, index) == newconst) {
-            break;
-        }
+    _Py_hashtable_entry_t *entry = _Py_hashtable_get_entry(consts_index, (void *)newconst);
+    if (entry != NULL) {
+        Py_DECREF(newconst);
+        return (int)(uintptr_t)entry->value;
     }
-    if (index == PyList_GET_SIZE(consts)) {
-        if ((size_t)index >= (size_t)INT_MAX - 1) {
-            PyErr_SetString(PyExc_OverflowError, "too many constants");
-            Py_DECREF(newconst);
-            return -1;
-        }
-        if (PyList_Append(consts, newconst)) {
-            Py_DECREF(newconst);
-            return -1;
-        }
+
+    Py_ssize_t index = PyList_GET_SIZE(consts);
+    if ((size_t)index >= (size_t)INT_MAX - 1) {
+        PyErr_SetString(PyExc_OverflowError, "too many constants");
+        Py_DECREF(newconst);
+        return -1;
     }
+    if (PyList_Append(consts, newconst)) {
+        Py_DECREF(newconst);
+        return -1;
+    }
+
+    if (_Py_hashtable_set(consts_index, (void *)newconst, (void *)(uintptr_t)index) < 0) {
+        PyList_SetSlice(consts, index, index + 1, NULL);
+        Py_DECREF(newconst);
+        PyErr_NoMemory();
+        return -1;
+    }
+
     Py_DECREF(newconst);
     return (int)index;
 }
@@ -1397,7 +1413,7 @@ maybe_instr_make_load_smallint(cfg_instr *instr, PyObject *newconst,
         if (val == -1 && PyErr_Occurred()) {
             return -1;
         }
-        if (!overflow && _PY_IS_SMALL_INT(val)) {
+        if (!overflow && _PY_IS_SMALL_INT(val) && 0 <= val && val <= 255) {
             assert(_Py_IsImmortal(newconst));
             INSTR_SET_OP1(instr, LOAD_SMALL_INT, (int)val);
             return 1;
@@ -1410,7 +1426,8 @@ maybe_instr_make_load_smallint(cfg_instr *instr, PyObject *newconst,
 /* Steals reference to "newconst" */
 static int
 instr_make_load_const(cfg_instr *instr, PyObject *newconst,
-                      PyObject *consts, PyObject *const_cache)
+                      PyObject *consts, PyObject *const_cache,
+                      _Py_hashtable_t *consts_index)
 {
     int res = maybe_instr_make_load_smallint(instr, newconst, consts, const_cache);
     if (res < 0) {
@@ -1420,7 +1437,7 @@ instr_make_load_const(cfg_instr *instr, PyObject *newconst,
     if (res > 0) {
         return SUCCESS;
     }
-    int oparg = add_const(newconst, consts, const_cache);
+    int oparg = add_const(newconst, consts, const_cache, consts_index);
     RETURN_IF_ERROR(oparg);
     INSTR_SET_OP1(instr, LOAD_CONST, oparg);
     return SUCCESS;
@@ -1433,7 +1450,8 @@ instr_make_load_const(cfg_instr *instr, PyObject *newconst,
    Called with codestr pointing to the first LOAD_CONST.
 */
 static int
-fold_tuple_of_constants(basicblock *bb, int i, PyObject *consts, PyObject *const_cache)
+fold_tuple_of_constants(basicblock *bb, int i, PyObject *consts,
+                        PyObject *const_cache, _Py_hashtable_t *consts_index)
 {
     /* Pre-conditions */
     assert(PyDict_CheckExact(const_cache));
@@ -1470,37 +1488,52 @@ fold_tuple_of_constants(basicblock *bb, int i, PyObject *consts, PyObject *const
     }
 
     nop_out(const_instrs, seq_size);
-    return instr_make_load_const(instr, const_tuple, consts, const_cache);
+    return instr_make_load_const(instr, const_tuple, consts, const_cache, consts_index);
 }
 
 /* Replace:
-    BUILD_LIST 0
+    BUILD_LIST/BUILD_SET 0
     LOAD_CONST c1
-    LIST_APPEND 1
+    LIST_APPEND/SET_ADD 1
     LOAD_CONST c2
-    LIST_APPEND 1
+    LIST_APPEND/SET_ADD 1
     ...
     LOAD_CONST cN
-    LIST_APPEND 1
-    CALL_INTRINSIC_1 INTRINSIC_LIST_TO_TUPLE
+    LIST_APPEND/SET_ADD 1
+    [CALL_INTRINSIC_1 INTRINSIC_LIST_TO_TUPLE]   <-- optional
    with:
     LOAD_CONST (c1, c2, ... cN)
+   The instruction at `i` is either the LIST_TO_TUPLE intrinsic (so the
+   immediately preceding non-NOP instruction is expected to be a
+   LIST_APPEND, and only the BUILD_LIST/LIST_APPEND form is considered),
+   or the trailing LIST_APPEND or SET_ADD itself, in which case the
+   matching BUILD_LIST/BUILD_SET start is selected from its opcode, and
+   for sets the result is wrapped in a frozenset.
 */
 static int
-fold_constant_intrinsic_list_to_tuple(basicblock *bb, int i,
-                                      PyObject *consts, PyObject *const_cache)
+fold_constant_seq_into_load_const(basicblock *bb, int i,
+                                  PyObject *consts, PyObject *const_cache,
+                                  _Py_hashtable_t *consts_index)
 {
     assert(PyDict_CheckExact(const_cache));
     assert(PyList_CheckExact(consts));
     assert(i >= 0);
     assert(i < bb->b_iused);
 
-    cfg_instr *intrinsic = &bb->b_instr[i];
-    assert(intrinsic->i_opcode == CALL_INTRINSIC_1);
-    assert(intrinsic->i_oparg == INTRINSIC_LIST_TO_TUPLE);
-
+    cfg_instr *target = &bb->b_instr[i];
+    assert(target->i_opcode == LIST_APPEND || target->i_opcode == SET_ADD ||
+           (target->i_opcode == CALL_INTRINSIC_1 &&
+            target->i_oparg == INTRINSIC_LIST_TO_TUPLE));
+    bool expected_append = target->i_opcode == CALL_INTRINSIC_1;
+    int append_op = expected_append ? LIST_APPEND : target->i_opcode;
+    assert(append_op == LIST_APPEND || append_op == SET_ADD);
+    int build_op = append_op == LIST_APPEND ? BUILD_LIST : BUILD_SET;
     int consts_found = 0;
-    bool expect_append = true;
+    /* Walking backward from `i`, we expect LIST_APPEND/SET_ADD and
+       LOAD_CONST to alternate. If `i` is the trailing LIST_TO_TUPLE
+       intrinsic, the next instruction back is an APPEND. If `i` is the
+       trailing APPEND itself, the next instruction back is a LOAD_CONST. */
+    bool expect_append = expected_append;
 
     for (int pos = i - 1; pos >= 0; pos--) {
         cfg_instr *instr = &bb->b_instr[pos];
@@ -1511,7 +1544,7 @@ fold_constant_intrinsic_list_to_tuple(basicblock *bb, int i,
             continue;
         }
 
-        if (opcode == BUILD_LIST && oparg == 0) {
+        if (opcode == build_op && oparg == 0) {
             if (!expect_append) {
                 /* Not a sequence start. */
                 return SUCCESS;
@@ -1523,7 +1556,8 @@ fold_constant_intrinsic_list_to_tuple(basicblock *bb, int i,
                 return ERROR;
             }
 
-            for (int newpos = i - 1; newpos >= pos; newpos--) {
+            int newpos_start = expected_append ? i - 1 : i;
+            for (int newpos = newpos_start; newpos >= pos; newpos--) {
                 instr = &bb->b_instr[newpos];
                 if (instr->i_opcode == NOP) {
                     continue;
@@ -1540,11 +1574,20 @@ fold_constant_intrinsic_list_to_tuple(basicblock *bb, int i,
                 nop_out(&instr, 1);
             }
             assert(consts_found == 0);
-            return instr_make_load_const(intrinsic, newconst, consts, const_cache);
+
+            if (build_op == BUILD_SET) {
+                PyObject *frozen = PyFrozenSet_New(newconst);
+                Py_DECREF(newconst);
+                if (frozen == NULL) {
+                    return ERROR;
+                }
+                newconst = frozen;
+            }
+            return instr_make_load_const(target, newconst, consts, const_cache, consts_index);
         }
 
         if (expect_append) {
-            if (opcode != LIST_APPEND || oparg != 1) {
+            if (opcode != append_op || oparg != 1) {
                 return SUCCESS;
             }
         }
@@ -1576,7 +1619,8 @@ Optimize lists and sets for:
 */
 static int
 optimize_lists_and_sets(basicblock *bb, int i, int nextop,
-                        PyObject *consts, PyObject *const_cache)
+                        PyObject *consts, PyObject *const_cache,
+                        _Py_hashtable_t *consts_index)
 {
     assert(PyDict_CheckExact(const_cache));
     assert(PyList_CheckExact(consts));
@@ -1626,7 +1670,7 @@ optimize_lists_and_sets(basicblock *bb, int i, int nextop,
         Py_SETREF(const_result, frozenset);
     }
 
-    int index = add_const(const_result, consts, const_cache);
+    int index = add_const(const_result, consts, const_cache, consts_index);
     RETURN_IF_ERROR(index);
     nop_out(const_instrs, seq_size);
 
@@ -1823,7 +1867,8 @@ eval_const_binop(PyObject *left, int op, PyObject *right)
 }
 
 static int
-fold_const_binop(basicblock *bb, int i, PyObject *consts, PyObject *const_cache)
+fold_const_binop(basicblock *bb, int i, PyObject *consts,
+                 PyObject *const_cache, _Py_hashtable_t *consts_index)
 {
     #define BINOP_OPERAND_COUNT 2
     assert(PyDict_CheckExact(const_cache));
@@ -1865,7 +1910,7 @@ fold_const_binop(basicblock *bb, int i, PyObject *consts, PyObject *const_cache)
     }
 
     nop_out(operands_instrs, BINOP_OPERAND_COUNT);
-    return instr_make_load_const(binop, newconst, consts, const_cache);
+    return instr_make_load_const(binop, newconst, consts, const_cache, consts_index);
 }
 
 static PyObject *
@@ -1911,7 +1956,8 @@ eval_const_unaryop(PyObject *operand, int opcode, int oparg)
 }
 
 static int
-fold_const_unaryop(basicblock *bb, int i, PyObject *consts, PyObject *const_cache)
+fold_const_unaryop(basicblock *bb, int i, PyObject *consts,
+                   PyObject *const_cache, _Py_hashtable_t *consts_index)
 {
     #define UNARYOP_OPERAND_COUNT 1
     assert(PyDict_CheckExact(const_cache));
@@ -1948,7 +1994,7 @@ fold_const_unaryop(basicblock *bb, int i, PyObject *consts, PyObject *const_cach
         assert(PyBool_Check(newconst));
     }
     nop_out(&operand_instr, UNARYOP_OPERAND_COUNT);
-    return instr_make_load_const(unaryop, newconst, consts, const_cache);
+    return instr_make_load_const(unaryop, newconst, consts, const_cache, consts_index);
 }
 
 #define VISITED (-1)
@@ -2143,7 +2189,8 @@ apply_static_swaps(basicblock *block, int i)
 }
 
 static int
-basicblock_optimize_load_const(PyObject *const_cache, basicblock *bb, PyObject *consts)
+basicblock_optimize_load_const(PyObject *const_cache, basicblock *bb,
+                               PyObject *consts, _Py_hashtable_t *consts_index)
 {
     assert(PyDict_CheckExact(const_cache));
     assert(PyList_CheckExact(consts));
@@ -2153,6 +2200,9 @@ basicblock_optimize_load_const(PyObject *const_cache, basicblock *bb, PyObject *
         cfg_instr *inst = &bb->b_instr[i];
         if (inst->i_opcode == LOAD_CONST) {
             PyObject *constant = get_const_value(inst->i_opcode, inst->i_oparg, consts);
+            if (constant == NULL) {
+                return ERROR;
+            }
             int res = maybe_instr_make_load_smallint(inst, constant, consts, const_cache);
             Py_DECREF(constant);
             if (res < 0) {
@@ -2258,7 +2308,7 @@ basicblock_optimize_load_const(PyObject *const_cache, basicblock *bb, PyObject *
                     return ERROR;
                 }
                 cnt = PyBool_FromLong(is_true);
-                int index = add_const(cnt, consts, const_cache);
+                int index = add_const(cnt, consts, const_cache, consts_index);
                 if (index < 0) {
                     return ERROR;
                 }
@@ -2272,15 +2322,17 @@ basicblock_optimize_load_const(PyObject *const_cache, basicblock *bb, PyObject *
 }
 
 static int
-optimize_load_const(PyObject *const_cache, cfg_builder *g, PyObject *consts) {
+optimize_load_const(PyObject *const_cache, cfg_builder *g, PyObject *consts,
+                    _Py_hashtable_t *consts_index) {
     for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
-        RETURN_IF_ERROR(basicblock_optimize_load_const(const_cache, b, consts));
+        RETURN_IF_ERROR(basicblock_optimize_load_const(const_cache, b, consts, consts_index));
     }
     return SUCCESS;
 }
 
 static int
-optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
+optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts,
+                     _Py_hashtable_t *consts_index)
 {
     assert(PyDict_CheckExact(const_cache));
     assert(PyList_CheckExact(consts));
@@ -2320,11 +2372,11 @@ optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
                             continue;
                     }
                 }
-                RETURN_IF_ERROR(fold_tuple_of_constants(bb, i, consts, const_cache));
+                RETURN_IF_ERROR(fold_tuple_of_constants(bb, i, consts, const_cache, consts_index));
                 break;
             case BUILD_LIST:
             case BUILD_SET:
-                RETURN_IF_ERROR(optimize_lists_and_sets(bb, i, nextop, consts, const_cache));
+                RETURN_IF_ERROR(optimize_lists_and_sets(bb, i, nextop, consts, const_cache, consts_index));
                 break;
             case POP_JUMP_IF_NOT_NONE:
             case POP_JUMP_IF_NONE:
@@ -2459,23 +2511,28 @@ optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
                 _Py_FALLTHROUGH;
             case UNARY_INVERT:
             case UNARY_NEGATIVE:
-                RETURN_IF_ERROR(fold_const_unaryop(bb, i, consts, const_cache));
+                RETURN_IF_ERROR(fold_const_unaryop(bb, i, consts, const_cache, consts_index));
                 break;
             case CALL_INTRINSIC_1:
                 if (oparg == INTRINSIC_LIST_TO_TUPLE) {
-                    if (nextop == GET_ITER) {
+                    RETURN_IF_ERROR(fold_constant_seq_into_load_const(bb, i, consts, const_cache, consts_index));
+                    if (inst->i_opcode == CALL_INTRINSIC_1 && nextop == GET_ITER) {
                         INSTR_SET_OP0(inst, NOP);
-                    }
-                    else {
-                        RETURN_IF_ERROR(fold_constant_intrinsic_list_to_tuple(bb, i, consts, const_cache));
                     }
                 }
                 else if (oparg == INTRINSIC_UNARY_POSITIVE) {
-                    RETURN_IF_ERROR(fold_const_unaryop(bb, i, consts, const_cache));
+                    RETURN_IF_ERROR(fold_const_unaryop(bb, i, consts, const_cache, consts_index));
+                }
+                break;
+            case LIST_APPEND:
+            case SET_ADD:
+                if (oparg == 1 && (nextop == GET_ITER || nextop == CONTAINS_OP)) {
+                    RETURN_IF_ERROR(fold_constant_seq_into_load_const(
+                        bb, i, consts, const_cache, consts_index));
                 }
                 break;
             case BINARY_OP:
-                RETURN_IF_ERROR(fold_const_binop(bb, i, consts, const_cache));
+                RETURN_IF_ERROR(fold_const_binop(bb, i, consts, const_cache, consts_index));
                 break;
         }
     }
@@ -2520,16 +2577,17 @@ remove_redundant_nops_and_jumps(cfg_builder *g)
    NOPs.  Later those NOPs are removed.
 */
 static int
-optimize_cfg(cfg_builder *g, PyObject *consts, PyObject *const_cache, int firstlineno)
+optimize_cfg(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+             _Py_hashtable_t *consts_index, int firstlineno)
 {
     assert(PyDict_CheckExact(const_cache));
     RETURN_IF_ERROR(check_cfg(g));
     RETURN_IF_ERROR(inline_small_or_no_lineno_blocks(g->g_entryblock));
     RETURN_IF_ERROR(remove_unreachable(g->g_entryblock));
     RETURN_IF_ERROR(resolve_line_numbers(g, firstlineno));
-    RETURN_IF_ERROR(optimize_load_const(const_cache, g, consts));
+    RETURN_IF_ERROR(optimize_load_const(const_cache, g, consts, consts_index));
     for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
-        RETURN_IF_ERROR(optimize_basic_block(const_cache, b, consts));
+        RETURN_IF_ERROR(optimize_basic_block(const_cache, b, consts, consts_index));
     }
     RETURN_IF_ERROR(remove_redundant_nops_and_pairs(g->g_entryblock));
     RETURN_IF_ERROR(remove_unreachable(g->g_entryblock));
@@ -3155,6 +3213,7 @@ remove_unused_consts(basicblock *entryblock, PyObject *consts)
 
     index_map = PyMem_Malloc(nconsts * sizeof(Py_ssize_t));
     if (index_map == NULL) {
+        PyErr_NoMemory();
         goto end;
     }
     for (Py_ssize_t i = 1; i < nconsts; i++) {
@@ -3207,6 +3266,7 @@ remove_unused_consts(basicblock *entryblock, PyObject *consts)
     /* adjust const indices in the bytecode */
     reverse_index_map = PyMem_Malloc(nconsts * sizeof(Py_ssize_t));
     if (reverse_index_map == NULL) {
+        PyErr_NoMemory();
         goto end;
     }
     for (Py_ssize_t i = 0; i < nconsts; i++) {
@@ -3630,6 +3690,7 @@ _PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
                         int nlocals, int nparams, int firstlineno)
 {
     assert(cfg_builder_check(g));
+    assert(g->g_entryblock->b_iused > 0);
     /** Preprocessing **/
     /* Map labels to targets and mark exception handlers */
     RETURN_IF_ERROR(translate_jump_labels_to_targets(g->g_entryblock));
@@ -3637,7 +3698,33 @@ _PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
     RETURN_IF_ERROR(label_exception_targets(g->g_entryblock));
 
     /** Optimization **/
-    RETURN_IF_ERROR(optimize_cfg(g, consts, const_cache, firstlineno));
+
+    _Py_hashtable_t *consts_index = _Py_hashtable_new(
+        _Py_hashtable_hash_ptr, _Py_hashtable_compare_direct);
+    if (consts_index == NULL) {
+        PyErr_NoMemory();
+        return ERROR;
+    }
+
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(consts); i++) {
+        PyObject *item = PyList_GET_ITEM(consts, i);
+        if (_Py_hashtable_get_entry(consts_index, (void *)item) != NULL) {
+            continue;
+        }
+        if (_Py_hashtable_set(consts_index, (void *)item,
+                              (void *)(uintptr_t)i) < 0) {
+            _Py_hashtable_destroy(consts_index);
+            PyErr_NoMemory();
+            return ERROR;
+        }
+    }
+
+    int ret = optimize_cfg(g, consts, const_cache, consts_index, firstlineno);
+
+    _Py_hashtable_destroy(consts_index);
+
+    RETURN_IF_ERROR(ret);
+
     RETURN_IF_ERROR(remove_unused_consts(g->g_entryblock, consts));
     RETURN_IF_ERROR(
         add_checks_for_loads_of_uninitialized_variables(
@@ -4071,6 +4158,10 @@ _PyCompile_OptimizeCfg(PyObject *seq, PyObject *consts, int nlocals)
 {
     if (!_PyInstructionSequence_Check(seq)) {
         PyErr_SetString(PyExc_ValueError, "expected an instruction sequence");
+        return NULL;
+    }
+    if (!PyList_Check(consts)) {
+        PyErr_SetString(PyExc_TypeError, "consts must be a list");
         return NULL;
     }
     PyObject *const_cache = PyDict_New();

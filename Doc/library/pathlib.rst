@@ -131,10 +131,11 @@ we also call *flavours*:
       >>> PurePath(Path('foo'), Path('bar'))
       PurePosixPath('foo/bar')
 
-   When *pathsegments* is empty, the current directory is assumed::
+   When *pathsegments* is empty or consists only of empty strings,
+   the current directory is assumed::
 
-      >>> PurePath()
-      PurePosixPath('.')
+      >>> PurePath(), PurePath('')
+      (PurePosixPath('.'), PurePosixPath('.'))
 
    If a segment is an absolute path, all previous segments are ignored
    (like :func:`os.path.join`)::
@@ -311,7 +312,7 @@ Pure paths provide the following methods and properties:
 .. attribute:: PurePath.parser
 
    The implementation of the :mod:`os.path` module used for low-level path
-   parsing and joining: either :mod:`posixpath` or :mod:`ntpath`.
+   parsing and joining: either :mod:`!posixpath` or :mod:`!ntpath`.
 
    .. versionadded:: 3.13
 
@@ -485,6 +486,10 @@ Pure paths provide the following methods and properties:
       'library'
       >>> PurePosixPath('my/library').stem
       'library'
+
+   .. versionchanged:: 3.14
+
+      A single dot ("``.``") is considered a valid suffix.
 
 
 .. method:: PurePath.as_posix()
@@ -1050,8 +1055,8 @@ Querying file type and status
 
 .. method:: Path.exists(*, follow_symlinks=True)
 
-   Return ``True`` if the path points to an existing file or directory.
-   ``False`` will be returned if the path is invalid, inaccessible or missing.
+   Return ``True`` if the path points to an existing file or directory and
+   ``False`` if the path is invalid, inaccessible or missing.
    Use :meth:`Path.stat` to distinguish between these cases.
 
    This method normally follows symlinks; to check if a symlink exists, add
@@ -1059,6 +1064,8 @@ Querying file type and status
 
    ::
 
+      >>> Path('').exists()  # The current directory.
+      True
       >>> Path('.').exists()
       True
       >>> Path('setup.py').exists()
@@ -1345,6 +1352,10 @@ Reading directories
        PosixPath('setup.py'),
        PosixPath('test_pathlib.py')]
 
+   .. note::
+      The paths are returned in no particular order.
+      If you need a specific order, sort the results.
+
    .. seealso::
       :ref:`pathlib-pattern-language` documentation.
 
@@ -1356,6 +1367,11 @@ Reading directories
    By default, or when the *recurse_symlinks* keyword-only argument is set to
    ``False``, this method follows symlinks except when expanding "``**``"
    wildcards. Set *recurse_symlinks* to ``True`` to always follow symlinks.
+
+   .. note::
+      Any :exc:`OSError` exceptions raised from scanning the filesystem are
+      suppressed. This includes :exc:`PermissionError` when accessing
+      directories without read permission.
 
    .. audit-event:: pathlib.Path.glob self,pattern pathlib.Path.glob
 
@@ -1378,6 +1394,15 @@ Reading directories
 
    Glob the given relative *pattern* recursively.  This is like calling
    :func:`Path.glob` with "``**/``" added in front of the *pattern*.
+
+   .. note::
+      The paths are returned in no particular order.
+      If you need a specific order, sort the results.
+
+   .. note::
+      Any :exc:`OSError` exceptions raised from scanning the filesystem are
+      suppressed. This includes :exc:`PermissionError` when accessing
+      directories without read permission.
 
    .. seealso::
       :ref:`pathlib-pattern-language` and :meth:`Path.glob` documentation.
@@ -1889,7 +1914,7 @@ Below is a table mapping various :mod:`os` functions to their corresponding
 :class:`PurePath`/:class:`Path` equivalent.
 
 =====================================   ==============================================
-:mod:`os` and :mod:`os.path`            :mod:`pathlib`
+:mod:`os` and :mod:`os.path`            :mod:`!pathlib`
 =====================================   ==============================================
 :func:`os.path.dirname`                 :attr:`PurePath.parent`
 :func:`os.path.basename`                :attr:`PurePath.name`
@@ -1948,7 +1973,7 @@ Protocols
    :synopsis: pathlib types for static type checking
 
 
-The :mod:`pathlib.types` module provides types for static type checking.
+The :mod:`!pathlib.types` module provides types for static type checking.
 
 .. versionadded:: 3.14
 

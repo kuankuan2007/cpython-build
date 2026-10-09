@@ -44,15 +44,16 @@ log = logging.getLogger("multissl")
 
 OPENSSL_OLD_VERSIONS = [
     "1.1.1w",
+    "3.0.22",
     "3.1.8",
+    "3.2.6",
+    "3.3.7",
 ]
 
 OPENSSL_RECENT_VERSIONS = [
-    "3.0.16",
-    "3.2.5",
-    "3.3.4",
-    "3.4.2",
-    "3.5.2",
+    "3.4.8",
+    "3.5.9",
+    "3.6.5",
     # See make_ssl_data.py for notes on adding a new version.
 ]
 
@@ -145,6 +146,12 @@ parser.add_argument(
     action='store_true',
     dest='keep_sources',
     help="Keep original sources for debugging."
+)
+parser.add_argument(
+    '--tsan',
+    action='store_true',
+    dest='tsan',
+    help="Build with thread sanitizer. (Disables fips in OpenSSL 3.x)."
 )
 
 
@@ -294,12 +301,14 @@ class AbstractBuilder(object):
                 raise ValueError(member.name, base)
             member.name = member.name[len(base):].lstrip('/')
         log.info("Unpacking files to {}".format(self.build_dir))
-        tf.extractall(self.build_dir, members)
+        tf.extractall(self.build_dir, members, filter='data')
 
     def _build_src(self, config_args=()):
         """Now build openssl"""
         log.info("Running build in {}".format(self.build_dir))
         cwd = self.build_dir
+        if self.args.tsan:
+            config_args += ("-fsanitize=thread",)
         cmd = [
             "./config", *config_args,
             "shared", "--debug",

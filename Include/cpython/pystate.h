@@ -28,10 +28,10 @@ typedef int (*Py_tracefunc)(PyObject *, PyFrameObject *, int, PyObject *);
 #define PyTrace_OPCODE 7
 
 /* Remote debugger support */
-#define Py_MAX_SCRIPT_PATH_SIZE 512
+#define _Py_MAX_SCRIPT_PATH_SIZE 512
 typedef struct {
     int32_t debugger_pending_call;
-    char debugger_script_path[Py_MAX_SCRIPT_PATH_SIZE];
+    char debugger_script_path[_Py_MAX_SCRIPT_PATH_SIZE];
 } _PyRemoteDebuggerSupport;
 
 typedef struct _err_stackitem {
@@ -208,6 +208,8 @@ struct _ts {
     */
     PyObject *threading_local_sentinel;
     _PyRemoteDebuggerSupport remote_debugger_support;
+
+    _PyStackChunk *datastack_cached_chunk;
 };
 
 /* other API */
@@ -242,6 +244,18 @@ PyAPI_FUNC(int) PyGILState_Check(void);
    thread id to that thread's current frame.
 */
 PyAPI_FUNC(PyObject*) _PyThread_CurrentFrames(void);
+
+// Set the stack protection start address and stack protection size
+// of a Python thread state
+PyAPI_FUNC(int) PyUnstable_ThreadState_SetStackProtection(
+    PyThreadState *tstate,
+    void *stack_start_addr,  // Stack start address
+    size_t stack_size);      // Stack size (in bytes)
+
+// Reset the stack protection start address and stack protection size
+// of a Python thread state
+PyAPI_FUNC(void) PyUnstable_ThreadState_ResetStackProtection(
+    PyThreadState *tstate);
 
 /* Routines for advanced debuggers, requested by David Beazley.
    Don't use unless you know what you are doing! */

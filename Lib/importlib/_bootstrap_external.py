@@ -208,12 +208,8 @@ def _write_atomic(path, data, mode=0o666):
     try:
         # We first write data to a temporary file, and then use os.replace() to
         # perform an atomic rename.
-        with _io.FileIO(fd, 'wb') as file:
-            bytes_written = file.write(data)
-        if bytes_written != len(data):
-            # Raise an OSError so the 'except' below cleans up the partially
-            # written file.
-            raise OSError("os.write() didn't write the full pyc file")
+        with _io.open(fd, 'wb') as file:
+            file.write(data)
         _os.replace(path_tmp, path)
     except OSError:
         try:
@@ -297,7 +293,8 @@ def cache_from_source(path, debug_override=None, *, optimization=None):
         # Strip initial drive from a Windows path. We know we have an absolute
         # path here, so the second part of the check rules out a POSIX path that
         # happens to contain a colon at the second character.
-        if head[1] == ':' and head[0] not in path_separators:
+        # Slicing avoids issues with an empty (or short) `head`.
+        if head[1:2] == ':' and head[0:1] not in path_separators:
             head = head[2:]
 
         # Strip initial path separator from `head` to complete the conversion
@@ -649,6 +646,10 @@ def _bless_my_loader(module_globals):
     loader = module_globals.get('__loader__', None)
     spec = module_globals.get('__spec__', missing)
 
+    # The __main__ module of a script or the REPL has __spec__ set to None.
+    if spec is None and module_globals.get('__name__') == '__main__':
+        return loader
+
     if loader is None:
         if spec is missing:
             # If working with a module:
@@ -949,7 +950,7 @@ class FileLoader:
 
     def get_data(self, path):
         """Return the data from path as raw bytes."""
-        if isinstance(self, (SourceLoader, ExtensionFileLoader)):
+        if isinstance(self, (SourceLoader, SourcelessFileLoader, ExtensionFileLoader)):
             with _io.open_code(str(path)) as file:
                 return file.read()
         else:
@@ -1497,7 +1498,13 @@ class AppleFrameworkLoader(ExtensionFileLoader):
         )
 
         # Ensure that the __file__ points at the .fwork location
-        module.__file__ = path
+        try:
+            module.__file__ = path
+        except AttributeError:
+            # Not important enough to report.
+            # (The error is also ignored in _bootstrap._init_module_attrs or
+            # import_run_extension in import.c)
+            pass
 
         return module
 

@@ -16,11 +16,12 @@ within *packages*.
 "Resources" are file-like resources associated with a module or package in
 Python. The resources may be contained directly in a package, within a
 subdirectory contained in that package, or adjacent to modules outside a
-package. Resources may be text or binary. As a result, Python module sources
-(.py) of a package and compilation artifacts (pycache) are technically
-de-facto resources of that package. In practice, however, resources are
-primarily those non-Python artifacts exposed specifically by the package
-author.
+package. Resources may be text or binary. As a result, a package's Python
+module sources (.py), compilation artifacts (pycache), and installation
+artifacts (like :func:`reserved filenames <os.path.isreserved>`
+in directories) are technically de-facto resources of that package.
+In practice, however, resources are primarily those non-Python artifacts
+exposed specifically by the package author.
 
 Resources can be opened or read in either binary or text mode.
 
@@ -30,15 +31,13 @@ not** have to exist as physical files and directories on the file system:
 for example, a package and its resources can be imported from a zip file using
 :py:mod:`zipimport`.
 
-.. note::
+.. warning::
 
-   This module provides functionality similar to `pkg_resources
-   <https://setuptools.readthedocs.io/en/latest/pkg_resources.html>`_ `Basic
-   Resource Access
-   <https://setuptools.readthedocs.io/en/latest/pkg_resources.html#basic-resource-access>`_
-   without the performance overhead of that package.  This makes reading
-   resources included in packages easier, with more stable and consistent
-   semantics.
+   :mod:`importlib.resources` follows the same security model as the built-in
+   :func:`open` function. Passing untrusted inputs to the functions
+   in this module is unsafe.
+
+.. note::
 
    The standalone backport of this module provides more information
    on `using importlib.resources
@@ -238,7 +237,6 @@ For all the following functions:
 
     .. versionchanged:: 3.13
         Multiple *path_names* are accepted.
-        *encoding* and *errors* must be given as keyword arguments.
 
 
 .. function:: is_resource(anchor, *path_names)

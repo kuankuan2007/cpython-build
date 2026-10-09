@@ -359,7 +359,7 @@ Usually, a method is called right after it is bound::
 
    x.f()
 
-In the :class:`!MyClass` example, this will return the string ``'hello world'``.
+If ``x = MyClass()``, as above, this will return the string ``'hello world'``.
 However, it is not necessary to call a method right away: ``x.f`` is a method
 object, and can be stored away and called at a later time.  For example::
 
@@ -420,7 +420,7 @@ of the class::
     'Buddy'
 
 As discussed in :ref:`tut-object`, shared data can have possibly surprising
-effects with involving :term:`mutable` objects such as lists and dictionaries.
+effects involving :term:`mutable` objects such as lists and dictionaries.
 For example, the *tricks* list in the following code should not be used as a
 class variable because just a single list would be shared by all *Dog*
 instances::

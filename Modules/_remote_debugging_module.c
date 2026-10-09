@@ -11,14 +11,6 @@
  * HEADERS AND INCLUDES
  * ============================================================================ */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #ifndef Py_BUILD_CORE_BUILTIN
 #    define Py_BUILD_CORE_MODULE 1
 #endif
@@ -28,7 +20,20 @@
 #include <internal/pycore_interpframe.h>    // FRAME_OWNED_BY_CSTACK
 #include <internal/pycore_llist.h>          // struct llist_node
 #include <internal/pycore_stackref.h>       // Py_TAG_BITS
+#include <internal/pycore_tstate.h>         // _PyThreadStateImpl
 #include "../Python/remote_debug.h"
+
+// gh-141784: Python.h header must be included first, before system headers.
+// Otherwise, some types such as ino_t can be defined differently, causing ABI
+// issues.
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef HAVE_PROCESS_VM_READV
 #    define HAVE_PROCESS_VM_READV 0
@@ -38,9 +43,11 @@
  * TYPE DEFINITIONS AND STRUCTURES
  * ============================================================================ */
 
-#define GET_MEMBER(type, obj, offset) (*(type*)((char*)(obj) + (offset)))
+#define GET_MEMBER(type, obj, offset) \
+    (*(type *)memcpy(&(type){0}, (const char *)(obj) + (offset), sizeof(type)))
 #define CLEAR_PTR_TAG(ptr) (((uintptr_t)(ptr) & ~Py_TAG_BITS))
-#define GET_MEMBER_NO_TAG(type, obj, offset) (type)(CLEAR_PTR_TAG(*(type*)((char*)(obj) + (offset))))
+#define GET_MEMBER_NO_TAG(type, obj, offset) \
+    (type)(CLEAR_PTR_TAG(GET_MEMBER(type, obj, offset)))
 
 /* Size macros for opaque buffers */
 #define SIZEOF_BYTES_OBJ sizeof(PyBytesObject)
@@ -74,6 +81,9 @@
                                   offsetof(PyInterpreterState, _gil.last_holder) + sizeof(PyThreadState*))
 #endif
 #define INTERP_STATE_BUFFER_SIZE MAX(INTERP_STATE_MIN_SIZE, 256)
+#define MAX_STACK_CHUNK_SIZE (16 * 1024 * 1024)  /* 16 MB max for stack chunks */
+#define MAX_SET_TABLE_SIZE (1 << 20)  /* 1 million entries max for set iteration */
+#define MAX_LONG_DIGITS 64  /* Allows values up to ~2^1920 */
 
 
 
@@ -100,6 +110,486 @@ struct _Py_AsyncioModuleDebugOffsets {
         uint64_t asyncio_tasks_head;
     } asyncio_thread_state;
 };
+
+/* Treat the remote debug tables as untrusted input and validate every
+ * size/offset we later dereference against a fixed local buffer or object
+ * layout before the unwinder starts using them. */
+#define FIELD_SIZE(type, member) sizeof(((type *)0)->member)
+#define PY_REMOTE_DEBUG_INVALID_ASYNC_DEBUG_OFFSETS (-2)
+
+static inline int
+validate_section_size(const char *section_name, uint64_t size)
+{
+    if (size == 0) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Invalid debug offsets: %s.size must be greater than zero",
+            section_name);
+        return -1;
+    }
+    return 0;
+}
+
+static inline int
+validate_read_size(const char *section_name, uint64_t size, size_t buffer_size)
+{
+    if (validate_section_size(section_name, size) < 0) {
+        return -1;
+    }
+    if (size > buffer_size) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Invalid debug offsets: %s.size=%llu exceeds local buffer size %zu",
+            section_name,
+            (unsigned long long)size,
+            buffer_size);
+        return -1;
+    }
+    return 0;
+}
+
+static inline int
+validate_span(
+    const char *field_name,
+    uint64_t offset,
+    size_t width,
+    uint64_t limit,
+    const char *limit_name)
+{
+    uint64_t span = (uint64_t)width;
+    if (span > limit || offset > limit - span) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Invalid debug offsets: %s=%llu with width %zu exceeds %s %llu",
+            field_name,
+            (unsigned long long)offset,
+            width,
+            limit_name,
+            (unsigned long long)limit);
+        return -1;
+    }
+    return 0;
+}
+
+static inline int
+validate_alignment(
+    const char *field_name,
+    uint64_t offset,
+    size_t alignment)
+{
+    if (alignment > 1 && offset % alignment != 0) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Invalid debug offsets: %s=%llu is not aligned to %zu bytes",
+            field_name,
+            (unsigned long long)offset,
+            alignment);
+        return -1;
+    }
+    return 0;
+}
+
+static inline int
+validate_field(
+    const char *field_name,
+    uint64_t offset,
+    uint64_t reported_size,
+    size_t width,
+    size_t alignment,
+    size_t buffer_size)
+{
+    if (validate_alignment(field_name, offset, alignment) < 0) {
+        return -1;
+    }
+    if (validate_span(field_name, offset, width, reported_size, "reported size") < 0) {
+        return -1;
+    }
+    return validate_span(field_name, offset, width, buffer_size, "local buffer size");
+}
+
+static inline int
+validate_fixed_field(
+    const char *field_name,
+    uint64_t offset,
+    size_t width,
+    size_t alignment,
+    size_t buffer_size)
+{
+    if (validate_alignment(field_name, offset, alignment) < 0) {
+        return -1;
+    }
+    return validate_span(field_name, offset, width, buffer_size, "local buffer size");
+}
+
+#define PY_REMOTE_DEBUG_VALIDATE_SECTION(section) \
+    do { \
+        if (validate_section_size(#section, debug_offsets->section.size) < 0) { \
+            return -1; \
+        } \
+    } while (0)
+
+#define PY_REMOTE_DEBUG_VALIDATE_READ_SECTION(section, buffer_size) \
+    do { \
+        if (validate_read_size(#section, debug_offsets->section.size, buffer_size) < 0) { \
+            return -1; \
+        } \
+    } while (0)
+
+#define PY_REMOTE_DEBUG_VALIDATE_FIELD(section, field, field_size, field_alignment, buffer_size) \
+    do { \
+        if (validate_field( \
+                #section "." #field, \
+                debug_offsets->section.field, \
+                debug_offsets->section.size, \
+                field_size, \
+                field_alignment, \
+                buffer_size) < 0) { \
+            return -1; \
+        } \
+    } while (0)
+
+#define PY_REMOTE_DEBUG_VALIDATE_FIXED_FIELD(section, field, field_size, field_alignment, buffer_size) \
+    do { \
+        if (validate_fixed_field( \
+                #section "." #field, \
+                debug_offsets->section.field, \
+                field_size, \
+                field_alignment, \
+                buffer_size) < 0) { \
+            return -1; \
+        } \
+    } while (0)
+
+static inline int
+validate_debug_offsets_layout(struct _Py_DebugOffsets *debug_offsets)
+{
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(runtime_state);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        runtime_state,
+        interpreters_head,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        sizeof(_PyRuntimeState));
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(interpreter_state);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        threads_head,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        INTERP_STATE_BUFFER_SIZE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        threads_main,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        INTERP_STATE_BUFFER_SIZE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        gil_runtime_state_locked,
+        sizeof(int),
+        _Alignof(int),
+        INTERP_STATE_BUFFER_SIZE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        gil_runtime_state_holder,
+        sizeof(PyThreadState *),
+        _Alignof(PyThreadState *),
+        INTERP_STATE_BUFFER_SIZE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        code_object_generation,
+        sizeof(uint64_t),
+        _Alignof(uint64_t),
+        INTERP_STATE_BUFFER_SIZE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_state,
+        tlbc_generation,
+        sizeof(uint32_t),
+        _Alignof(uint32_t),
+        INTERP_STATE_BUFFER_SIZE);
+
+    PY_REMOTE_DEBUG_VALIDATE_READ_SECTION(thread_state, SIZEOF_THREAD_STATE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        thread_state,
+        next,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_THREAD_STATE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        thread_state,
+        current_frame,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_THREAD_STATE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        thread_state,
+        native_thread_id,
+        sizeof(unsigned long),
+        _Alignof(unsigned long),
+        SIZEOF_THREAD_STATE);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        thread_state,
+        datastack_chunk,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_THREAD_STATE);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(interpreter_frame);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        previous,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_INTERP_FRAME);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        executable,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_INTERP_FRAME);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        instr_ptr,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_INTERP_FRAME);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        owner,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_INTERP_FRAME);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        stackpointer,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_INTERP_FRAME);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        interpreter_frame,
+        tlbc_index,
+        sizeof(int32_t),
+        _Alignof(int32_t),
+        SIZEOF_INTERP_FRAME);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(code_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        qualname,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_CODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        filename,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_CODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        linetable,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_CODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        firstlineno,
+        sizeof(int),
+        _Alignof(int),
+        SIZEOF_CODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        co_code_adaptive,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_CODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        code_object,
+        co_tlbc,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_CODE_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(pyobject);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        pyobject,
+        ob_type,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_PYOBJECT);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(type_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        type_object,
+        tp_flags,
+        sizeof(unsigned long),
+        _Alignof(unsigned long),
+        SIZEOF_TYPE_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(set_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        set_object,
+        used,
+        sizeof(Py_ssize_t),
+        _Alignof(Py_ssize_t),
+        SIZEOF_SET_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        set_object,
+        mask,
+        sizeof(Py_ssize_t),
+        _Alignof(Py_ssize_t),
+        SIZEOF_SET_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        set_object,
+        table,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_SET_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_READ_SECTION(long_object, SIZEOF_LONG_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        long_object,
+        lv_tag,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_LONG_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        long_object,
+        ob_digit,
+        sizeof(digit),
+        _Alignof(digit),
+        SIZEOF_LONG_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(bytes_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        bytes_object,
+        ob_size,
+        sizeof(Py_ssize_t),
+        _Alignof(Py_ssize_t),
+        SIZEOF_BYTES_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        bytes_object,
+        ob_sval,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_BYTES_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(unicode_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        unicode_object,
+        length,
+        sizeof(Py_ssize_t),
+        _Alignof(Py_ssize_t),
+        SIZEOF_UNICODE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        unicode_object,
+        asciiobject_size,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_UNICODE_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(gen_object);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        gen_object,
+        gi_frame_state,
+        sizeof(int8_t),
+        _Alignof(int8_t),
+        SIZEOF_GEN_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        gen_object,
+        gi_iframe,
+        FIELD_SIZE(PyGenObject, gi_iframe),
+        _Alignof(_PyInterpreterFrame),
+        SIZEOF_GEN_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_FIXED_FIELD(
+        llist_node,
+        next,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_LLIST_NODE);
+
+    return 0;
+}
+
+static inline int
+validate_async_debug_offsets_layout(struct _Py_AsyncioModuleDebugOffsets *debug_offsets)
+{
+    PY_REMOTE_DEBUG_VALIDATE_READ_SECTION(asyncio_task_object, SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_name,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_awaited_by,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_is_task,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_awaited_by_is_set,
+        sizeof(char),
+        _Alignof(char),
+        SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_coro,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_TASK_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_task_object,
+        task_node,
+        SIZEOF_LLIST_NODE,
+        _Alignof(struct llist_node),
+        SIZEOF_TASK_OBJ);
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(asyncio_interpreter_state);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_interpreter_state,
+        asyncio_tasks_head,
+        SIZEOF_LLIST_NODE,
+        _Alignof(struct llist_node),
+        sizeof(PyInterpreterState));
+
+    PY_REMOTE_DEBUG_VALIDATE_SECTION(asyncio_thread_state);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_thread_state,
+        asyncio_running_loop,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        sizeof(_PyThreadStateImpl));
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_thread_state,
+        asyncio_running_task,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        sizeof(_PyThreadStateImpl));
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        asyncio_thread_state,
+        asyncio_tasks_head,
+        SIZEOF_LLIST_NODE,
+        _Alignof(struct llist_node),
+        sizeof(_PyThreadStateImpl));
+
+    return 0;
+}
+
+#undef PY_REMOTE_DEBUG_VALIDATE_SECTION
+#undef PY_REMOTE_DEBUG_VALIDATE_READ_SECTION
+#undef PY_REMOTE_DEBUG_VALIDATE_FIELD
+#undef PY_REMOTE_DEBUG_VALIDATE_FIXED_FIELD
+#undef FIELD_SIZE
 
 /* ============================================================================
  * STRUCTSEQ TYPE DEFINITIONS
@@ -315,10 +805,13 @@ static int append_awaited_by(RemoteUnwinderObject *unwinder, unsigned long tid, 
  * UTILITY FUNCTIONS AND HELPERS
  * ============================================================================ */
 
-#define set_exception_cause(unwinder, exc_type, message) \
-    if (unwinder->debug) { \
-        _set_debug_exception_cause(exc_type, message); \
-    }
+#define set_exception_cause(unwinder, exc_type, message)                              \
+    do {                                                                              \
+        assert(PyErr_Occurred() && "function returned -1 without setting exception"); \
+        if (unwinder->debug && !_Py_RemoteDebug_HasPermissionError()) {               \
+            _set_debug_exception_cause(exc_type, message);                            \
+        }                                                                             \
+    } while (0)
 
 static void
 cached_code_metadata_destroy(void *ptr)
@@ -425,7 +918,7 @@ validate_debug_offsets(struct _Py_DebugOffsets *debug_offsets)
         return -1;
     }
 
-    return 0;
+    return validate_debug_offsets_layout(debug_offsets);
 }
 
 // Generic function to iterate through all threads
@@ -440,7 +933,7 @@ iterate_threads(
 
     if (0 > _Py_RemoteDebug_PagedReadRemoteMemory(
                 &unwinder->handle,
-                unwinder->interpreter_addr + unwinder->debug_offsets.interpreter_state.threads_main,
+                unwinder->interpreter_addr + (uintptr_t)unwinder->debug_offsets.interpreter_state.threads_main,
                 sizeof(void*),
                 &thread_state_addr))
     {
@@ -451,7 +944,7 @@ iterate_threads(
     while (thread_state_addr != 0) {
         if (0 > _Py_RemoteDebug_PagedReadRemoteMemory(
                     &unwinder->handle,
-                    thread_state_addr + unwinder->debug_offsets.thread_state.native_thread_id,
+                    thread_state_addr + (uintptr_t)unwinder->debug_offsets.thread_state.native_thread_id,
                     sizeof(tid),
                     &tid))
         {
@@ -467,7 +960,7 @@ iterate_threads(
         // Move to next thread
         if (0 > _Py_RemoteDebug_PagedReadRemoteMemory(
                     &unwinder->handle,
-                    thread_state_addr + unwinder->debug_offsets.thread_state.next,
+                    thread_state_addr + (uintptr_t)unwinder->debug_offsets.thread_state.next,
                     sizeof(void*),
                     &thread_state_addr))
         {
@@ -495,8 +988,15 @@ iterate_set_entries(
     }
 
     Py_ssize_t num_els = GET_MEMBER(Py_ssize_t, set_object, unwinder->debug_offsets.set_object.used);
-    Py_ssize_t set_len = GET_MEMBER(Py_ssize_t, set_object, unwinder->debug_offsets.set_object.mask) + 1;
+    Py_ssize_t mask = GET_MEMBER(Py_ssize_t, set_object, unwinder->debug_offsets.set_object.mask);
     uintptr_t table_ptr = GET_MEMBER(uintptr_t, set_object, unwinder->debug_offsets.set_object.table);
+    if (mask < 0 || mask >= MAX_SET_TABLE_SIZE || num_els < 0 || num_els > mask + 1) {
+        PyErr_SetString(PyExc_RuntimeError, "Invalid set object (corrupted remote memory)");
+        set_exception_cause(unwinder, PyExc_RuntimeError,
+            "Invalid set object (corrupted remote memory)");
+        return -1;
+    }
+    Py_ssize_t set_len = mask + 1;
 
     Py_ssize_t i = 0;
     Py_ssize_t els = 0;
@@ -609,11 +1109,15 @@ read_py_str(
     }
 
     Py_ssize_t len = GET_MEMBER(Py_ssize_t, unicode_obj, unwinder->debug_offsets.unicode_object.length);
-    if (len < 0 || len > max_len) {
+    if (len < 0) {
         PyErr_Format(PyExc_RuntimeError,
                      "Invalid string length (%zd) at 0x%lx", len, address);
         set_exception_cause(unwinder, PyExc_RuntimeError, "Invalid string length in remote Unicode object");
         return NULL;
+    }
+    if (len > max_len) {
+        // gh-157788: a long name must not fail the whole read
+        len = max_len;
     }
 
     buf = (char *)PyMem_RawMalloc(len+1);
@@ -623,7 +1127,7 @@ read_py_str(
         return NULL;
     }
 
-    size_t offset = unwinder->debug_offsets.unicode_object.asciiobject_size;
+    size_t offset = (size_t)unwinder->debug_offsets.unicode_object.asciiobject_size;
     res = _Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, address + offset, len, buf);
     if (res < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read string data from remote memory");
@@ -685,7 +1189,7 @@ read_py_bytes(
         return NULL;
     }
 
-    size_t offset = unwinder->debug_offsets.bytes_object.ob_sval;
+    size_t offset = (size_t)unwinder->debug_offsets.bytes_object.ob_sval;
     res = _Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, address + offset, len, buf);
     if (res < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read bytes data from remote memory");
@@ -723,7 +1227,7 @@ read_py_long(
     int bytes_read = _Py_RemoteDebug_PagedReadRemoteMemory(
         &unwinder->handle,
         address,
-        unwinder->debug_offsets.long_object.size,
+        (size_t)unwinder->debug_offsets.long_object.size,
         long_obj);
     if (bytes_read < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read PyLongObject");
@@ -738,29 +1242,33 @@ read_py_long(
         return 0;
     }
 
-    // If the long object has inline digits, use them directly
-    digit *digits;
-    if (size <= _PY_NSMALLNEGINTS + _PY_NSMALLPOSINTS) {
-        // For small integers, digits are inline in the long_value.ob_digit array
-        digits = (digit *)PyMem_RawMalloc(size * sizeof(digit));
-        if (!digits) {
-            PyErr_NoMemory();
-            set_exception_cause(unwinder, PyExc_MemoryError, "Failed to allocate digits for small PyLong");
-            return -1;
-        }
-        memcpy(digits, long_obj + unwinder->debug_offsets.long_object.ob_digit, size * sizeof(digit));
-    } else {
-        // For larger integers, we need to read the digits separately
-        digits = (digit *)PyMem_RawMalloc(size * sizeof(digit));
-        if (!digits) {
-            PyErr_NoMemory();
-            set_exception_cause(unwinder, PyExc_MemoryError, "Failed to allocate digits for large PyLong");
-            return -1;
-        }
+    if (size < 0 || size > MAX_LONG_DIGITS) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "Invalid PyLong digit count: %zd (expected 0-%d)",
+                     size, MAX_LONG_DIGITS);
+        set_exception_cause(unwinder, PyExc_RuntimeError,
+                            "Invalid PyLong size (corrupted remote memory)");
+        return -1;
+    }
 
+    // Calculate how many digits fit inline in our local buffer
+    Py_ssize_t ob_digit_offset = unwinder->debug_offsets.long_object.ob_digit;
+    Py_ssize_t inline_digits_space = SIZEOF_LONG_OBJ - ob_digit_offset;
+    Py_ssize_t max_inline_digits = inline_digits_space / (Py_ssize_t)sizeof(digit);
+
+    digit *digits = (digit *)PyMem_RawMalloc(size * sizeof(digit));
+    if (!digits) {
+        PyErr_NoMemory();
+        set_exception_cause(unwinder, PyExc_MemoryError, "Failed to allocate digits for PyLong");
+        return -1;
+    }
+
+    if (size <= max_inline_digits && size <= _PY_NSMALLNEGINTS + _PY_NSMALLPOSINTS) {
+        memcpy(digits, long_obj + ob_digit_offset, size * sizeof(digit));
+    } else {
         bytes_read = _Py_RemoteDebug_PagedReadRemoteMemory(
             &unwinder->handle,
-            address + unwinder->debug_offsets.long_object.ob_digit,
+            address + (uintptr_t)unwinder->debug_offsets.long_object.ob_digit,
             sizeof(digit) * size,
             digits
         );
@@ -770,19 +1278,34 @@ read_py_long(
         }
     }
 
-    long long value = 0;
+    unsigned long limit = negative
+        ? (unsigned long)LONG_MAX + 1UL
+        : (unsigned long)LONG_MAX;
+    unsigned long value = 0;
 
-    // In theory this can overflow, but because of llvm/llvm-project#16778
-    // we can't use __builtin_mul_overflow because it fails to link with
-    // __muloti4 on aarch64. In practice this is fine because all we're
-    // testing here are task numbers that would fit in a single byte.
-    for (Py_ssize_t i = 0; i < size; ++i) {
-        long long factor = digits[i] * (1UL << (Py_ssize_t)(shift * i));
-        value += factor;
+    for (Py_ssize_t i = size; i-- > 0;) {
+        if (digits[i] >= PyLong_BASE) {
+            PyErr_Format(PyExc_RuntimeError,
+                "Invalid PyLong digit: %u (base %u)", digits[i], PyLong_BASE);
+            set_exception_cause(unwinder, PyExc_RuntimeError,
+                "Invalid PyLong digit (corrupted remote memory)");
+            goto error;
+        }
+        if (value > ((limit - (unsigned long)digits[i]) >> shift)) {
+            PyErr_SetString(PyExc_OverflowError,
+                "Remote PyLong value does not fit in C long");
+            set_exception_cause(unwinder, PyExc_OverflowError,
+                "Remote PyLong value is too large");
+            goto error;
+        }
+        value = (value << shift) | (unsigned long)digits[i];
     }
     PyMem_RawFree(digits);
     if (negative) {
-        value *= -1;
+        if (value == (unsigned long)LONG_MAX + 1UL) {
+            return LONG_MIN;
+        }
+        return -(long)value;
     }
     return (long)value;
 error:
@@ -802,34 +1325,37 @@ _Py_RemoteDebug_GetAsyncioDebugAddress(proc_handle_t* handle)
 
 #ifdef MS_WINDOWS
     // On Windows, search for asyncio debug in executable or DLL
-    address = search_windows_map_for_section(handle, "AsyncioD", L"_asyncio");
+    address = search_windows_map_for_section(handle, "AsyncioD", L"_asyncio", NULL);
     if (address == 0) {
-        // Error out: 'python' substring covers both executable and DLL
-        PyObject *exc = PyErr_GetRaisedException();
-        PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
-        _PyErr_ChainExceptions1(exc);
+        if (!_Py_RemoteDebug_HasPermissionError()) {
+            PyObject *exc = PyErr_GetRaisedException();
+            PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
+            _PyErr_ChainExceptions1(exc);
+        }
     }
 #elif defined(__linux__)
     // On Linux, search for asyncio debug in executable or DLL
-    address = search_linux_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython");
+    address = search_linux_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython", NULL);
     if (address == 0) {
-        // Error out: 'python' substring covers both executable and DLL
-        PyObject *exc = PyErr_GetRaisedException();
-        PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
-        _PyErr_ChainExceptions1(exc);
+        if (!_Py_RemoteDebug_HasPermissionError()) {
+            PyObject *exc = PyErr_GetRaisedException();
+            PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
+            _PyErr_ChainExceptions1(exc);
+        }
     }
 #elif defined(__APPLE__) && TARGET_OS_OSX
     // On macOS, try libpython first, then fall back to python
-    address = search_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython");
-    if (address == 0) {
+    address = search_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython", NULL);
+    if (address == 0 && !_Py_RemoteDebug_HasPermissionError()) {
         PyErr_Clear();
-        address = search_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython");
+        address = search_map_for_section(handle, "AsyncioDebug", "_asyncio.cpython", NULL);
     }
     if (address == 0) {
-        // Error out: 'python' substring covers both executable and DLL
-        PyObject *exc = PyErr_GetRaisedException();
-        PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
-        _PyErr_ChainExceptions1(exc);
+        if (!_Py_RemoteDebug_HasPermissionError()) {
+            PyObject *exc = PyErr_GetRaisedException();
+            PyErr_SetString(PyExc_RuntimeError, "Failed to find the AsyncioDebug section in the process.");
+            _PyErr_ChainExceptions1(exc);
+        }
     }
 #else
     Py_UNREACHABLE();
@@ -852,8 +1378,13 @@ read_async_debug(
     int result = _Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, async_debug_addr, size, &unwinder->async_debug_offsets);
     if (result < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read AsyncioDebug offsets");
+        return result;
     }
-    return result;
+    if (validate_async_debug_offsets_layout(&unwinder->async_debug_offsets) < 0) {
+        set_exception_cause(unwinder, PyExc_RuntimeError, "Invalid AsyncioDebug offsets");
+        return PY_REMOTE_DEBUG_INVALID_ASYNC_DEBUG_OFFSETS;
+    }
+    return 0;
 }
 
 /* ============================================================================
@@ -870,7 +1401,7 @@ parse_task_name(
     int err = _Py_RemoteDebug_PagedReadRemoteMemory(
         &unwinder->handle,
         task_address,
-        unwinder->async_debug_offsets.asyncio_task_object.size,
+        (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
         task_obj);
     if (err < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object");
@@ -905,11 +1436,11 @@ parse_task_name(
 
     if ((GET_MEMBER(unsigned long, type_obj, unwinder->debug_offsets.type_object.tp_flags) & Py_TPFLAGS_LONG_SUBCLASS)) {
         long res = read_py_long(unwinder, task_name_addr);
-        if (res == -1) {
+        if (res == -1 && PyErr_Occurred()) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Task name PyLong parsing failed");
             return NULL;
         }
-        return PyUnicode_FromFormat("Task-%d", res);
+        return PyUnicode_FromFormat("Task-%ld", res);
     }
 
     if(!(GET_MEMBER(unsigned long, type_obj, unwinder->debug_offsets.type_object.tp_flags) & Py_TPFLAGS_UNICODE_SUBCLASS)) {
@@ -977,7 +1508,7 @@ handle_yield_from_frame(
             uintptr_t gi_await_addr_type_addr;
             err = read_ptr(
                 unwinder,
-                gi_await_addr + unwinder->debug_offsets.pyobject.ob_type,
+                gi_await_addr + (uintptr_t)unwinder->debug_offsets.pyobject.ob_type,
                 &gi_await_addr_type_addr);
             if (err) {
                 set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read gi_await type address");
@@ -1038,7 +1569,7 @@ parse_coro_chain(
 
     // Parse the previous frame using the gi_iframe from local copy
     uintptr_t prev_frame;
-    uintptr_t gi_iframe_addr = coro_address + unwinder->debug_offsets.gen_object.gi_iframe;
+    uintptr_t gi_iframe_addr = coro_address + (uintptr_t)unwinder->debug_offsets.gen_object.gi_iframe;
     uintptr_t address_of_code_object = 0;
     if (parse_frame_object(unwinder, &name, gi_iframe_addr, &address_of_code_object, &prev_frame) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse frame object in coro chain");
@@ -1090,7 +1621,7 @@ create_task_result(
 
     // Parse coroutine chain
     if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, task_address,
-                                              unwinder->async_debug_offsets.asyncio_task_object.size,
+                                              (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
                                               task_obj) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object for coro chain");
         goto error;
@@ -1143,7 +1674,7 @@ parse_task(
 
     err = read_char(
         unwinder,
-        task_address + unwinder->async_debug_offsets.asyncio_task_object.task_is_task,
+        task_address + (uintptr_t)unwinder->async_debug_offsets.asyncio_task_object.task_is_task,
         &is_task);
     if (err) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read is_task flag");
@@ -1291,7 +1822,7 @@ process_thread_for_awaited_by(
     void *context
 ) {
     PyObject *result = (PyObject *)context;
-    uintptr_t head_addr = thread_state_addr + unwinder->async_debug_offsets.asyncio_thread_state.asyncio_tasks_head;
+    uintptr_t head_addr = thread_state_addr + (uintptr_t)unwinder->async_debug_offsets.asyncio_thread_state.asyncio_tasks_head;
     return append_awaited_by(unwinder, tid, head_addr, result);
 }
 
@@ -1306,7 +1837,7 @@ process_task_awaited_by(
     // Read the entire TaskObj at once
     char task_obj[SIZEOF_TASK_OBJ];
     if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, task_address,
-                                              unwinder->async_debug_offsets.asyncio_task_object.size,
+                                              (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
                                               task_obj) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object");
         return -1;
@@ -1349,6 +1880,9 @@ process_running_task_chain(
     PyObject *coro_chain = PyStructSequence_GET_ITEM(task_info, 2);
     assert(coro_chain != NULL);
     if (PyList_GET_SIZE(coro_chain) != 1) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "Expected single-item coro chain, got %zd items",
+                     PyList_GET_SIZE(coro_chain));
         set_exception_cause(unwinder, PyExc_RuntimeError, "Coro chain is not a single item");
         return -1;
     }
@@ -1463,7 +1997,7 @@ find_running_task_in_thread(
     uintptr_t address_of_running_loop;
     int bytes_read = read_py_ptr(
         unwinder,
-        thread_state_addr + unwinder->async_debug_offsets.asyncio_thread_state.asyncio_running_loop,
+        thread_state_addr + (uintptr_t)unwinder->async_debug_offsets.asyncio_thread_state.asyncio_running_loop,
         &address_of_running_loop);
     if (bytes_read == -1) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read running loop address");
@@ -1477,7 +2011,7 @@ find_running_task_in_thread(
 
     int err = read_ptr(
         unwinder,
-        thread_state_addr + unwinder->async_debug_offsets.asyncio_thread_state.asyncio_running_task,
+        thread_state_addr + (uintptr_t)unwinder->async_debug_offsets.asyncio_thread_state.asyncio_running_task,
         running_task_addr);
     if (err) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read running task address");
@@ -1493,7 +2027,7 @@ get_task_code_object(RemoteUnwinderObject *unwinder, uintptr_t task_addr, uintpt
 
     if(read_py_ptr(
         unwinder,
-        task_addr + unwinder->async_debug_offsets.asyncio_task_object.task_coro,
+        task_addr + (uintptr_t)unwinder->async_debug_offsets.asyncio_task_object.task_coro,
         &running_coro_addr) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Running task coro read failed");
         return -1;
@@ -1509,7 +2043,7 @@ get_task_code_object(RemoteUnwinderObject *unwinder, uintptr_t task_addr, uintpt
     // the offset leads directly to its first field: f_executable
     if (read_py_ptr(
         unwinder,
-        running_coro_addr + unwinder->debug_offsets.gen_object.gi_iframe, code_obj_addr) < 0) {
+        running_coro_addr + (uintptr_t)unwinder->debug_offsets.gen_object.gi_iframe, code_obj_addr) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read running task code object");
         return -1;
     }
@@ -1552,9 +2086,12 @@ get_tlbc_cache_entry(RemoteUnwinderObject *self, uintptr_t code_addr, uint32_t c
     TLBCCacheEntry *entry = _Py_hashtable_get(self->tlbc_cache, key);
 
     if (entry && entry->generation != current_generation) {
-        // Entry is stale, remove it by setting to NULL
-        _Py_hashtable_set(self->tlbc_cache, key, NULL);
-        entry = NULL;
+        // Entry is stale, remove it from the cache and destroy it
+        TLBCCacheEntry *old = _Py_hashtable_steal(self->tlbc_cache, key);
+        if (old != NULL) {
+            tlbc_cache_entry_destroy(old);
+        }
+        return NULL;
     }
 
     return entry;
@@ -1610,6 +2147,7 @@ cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t 
     void *key = (void *)code_addr;
     if (_Py_hashtable_set(unwinder->tlbc_cache, key, entry) < 0) {
         tlbc_cache_entry_destroy(entry);
+        PyErr_NoMemory();
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to store TLBC entry in cache");
         return 0; // Cache error
     }
@@ -1657,7 +2195,7 @@ static bool
 parse_linetable(const uintptr_t addrq, const char* linetable, int firstlineno, LocationInfo* info)
 {
     const uint8_t* ptr = (const uint8_t*)(linetable);
-    uint64_t addr = 0;
+    uintptr_t addr = 0;
     info->lineno = firstlineno;
 
     while (*ptr != '\0') {
@@ -1785,10 +2323,14 @@ parse_code_object(RemoteUnwinderObject *unwinder,
         meta->file_name = file;
         meta->linetable = linetable;
         meta->first_lineno = GET_MEMBER(int, code_object, unwinder->debug_offsets.code_object.firstlineno);
-        meta->addr_code_adaptive = real_address + unwinder->debug_offsets.code_object.co_code_adaptive;
+        meta->addr_code_adaptive = real_address + (uintptr_t)unwinder->debug_offsets.code_object.co_code_adaptive;
 
         if (unwinder && unwinder->code_object_cache && _Py_hashtable_set(unwinder->code_object_cache, key, meta) < 0) {
+            func = NULL;
+            file = NULL;
+            linetable = NULL;
             cached_code_metadata_destroy(meta);
+            PyErr_NoMemory();
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to cache code metadata");
             goto error;
         }
@@ -1822,7 +2364,31 @@ parse_code_object(RemoteUnwinderObject *unwinder,
         tlbc_entry = get_tlbc_cache_entry(unwinder, real_address, unwinder->tlbc_generation);
     }
 
-    if (tlbc_entry && tlbc_index < tlbc_entry->tlbc_array_size) {
+    if (tlbc_entry && tlbc_index >= 0) {
+        uintptr_t *entries = (uintptr_t *)((char *)tlbc_entry->tlbc_array + sizeof(Py_ssize_t));
+        if (tlbc_index >= tlbc_entry->tlbc_array_size ||
+            entries[tlbc_index] == 0) {
+            TLBCCacheEntry *old = _Py_hashtable_steal(unwinder->tlbc_cache, (void *)real_address);
+            if (old != NULL) {
+                tlbc_cache_entry_destroy(old);
+            }
+            if (!cache_tlbc_array(unwinder, real_address, real_address + unwinder->debug_offsets.code_object.co_tlbc,
+                                unwinder->tlbc_generation)) {
+                goto error;
+            }
+            tlbc_entry = get_tlbc_cache_entry(unwinder, real_address, unwinder->tlbc_generation);
+        }
+    }
+
+    if (tlbc_entry) {
+        if (tlbc_index < 0 || tlbc_index >= tlbc_entry->tlbc_array_size) {
+            PyErr_Format(PyExc_RuntimeError,
+                "Invalid tlbc_index %d (array size %zd, corrupted remote memory)",
+                tlbc_index, tlbc_entry->tlbc_array_size);
+            set_exception_cause(unwinder, PyExc_RuntimeError,
+                "Invalid tlbc_index (corrupted remote memory)");
+            goto error;
+        }
         // Use cached TLBC data
         uintptr_t *entries = (uintptr_t *)((char *)tlbc_entry->tlbc_array + sizeof(Py_ssize_t));
         uintptr_t tlbc_bytecode_addr = entries[tlbc_index];
@@ -1921,12 +2487,23 @@ process_single_stack_chunk(
     // Check actual size and reread if necessary
     size_t actual_size = GET_MEMBER(size_t, this_chunk, offsetof(_PyStackChunk, size));
     if (actual_size != current_size) {
-        this_chunk = PyMem_RawRealloc(this_chunk, actual_size);
-        if (!this_chunk) {
+        if (actual_size <= offsetof(_PyStackChunk, data) || actual_size > MAX_STACK_CHUNK_SIZE) {
+            PyMem_RawFree(this_chunk);
+            PyErr_Format(PyExc_RuntimeError,
+                "Invalid stack chunk size %zu (corrupted remote memory)", actual_size);
+            set_exception_cause(unwinder, PyExc_RuntimeError,
+                "Invalid stack chunk size (corrupted remote memory)");
+            return -1;
+        }
+
+        char *tmp = PyMem_RawRealloc(this_chunk, actual_size);
+        if (!tmp) {
+            PyMem_RawFree(this_chunk);
             PyErr_NoMemory();
             set_exception_cause(unwinder, PyExc_MemoryError, "Failed to reallocate stack chunk buffer");
             return -1;
         }
+        this_chunk = tmp;
 
         if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, chunk_addr, actual_size, this_chunk) < 0) {
             PyMem_RawFree(this_chunk);
@@ -1952,7 +2529,7 @@ copy_stack_chunks(RemoteUnwinderObject *unwinder,
     size_t count = 0;
     size_t max_chunks = 16;
 
-    if (read_ptr(unwinder, tstate_addr + unwinder->debug_offsets.thread_state.datastack_chunk, &chunk_addr)) {
+    if (read_ptr(unwinder, tstate_addr + (uintptr_t)unwinder->debug_offsets.thread_state.datastack_chunk, &chunk_addr)) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read initial stack chunk address");
         return -1;
     }
@@ -2004,10 +2581,15 @@ static void *
 find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr)
 {
     for (size_t i = 0; i < chunks->count; ++i) {
+        if (chunks->chunks[i].size <= offsetof(_PyStackChunk, data)) {
+            continue;
+        }
         uintptr_t base = chunks->chunks[i].remote_addr + offsetof(_PyStackChunk, data);
         size_t payload = chunks->chunks[i].size - offsetof(_PyStackChunk, data);
 
-        if (remote_ptr >= base && remote_ptr < base + payload) {
+        if (payload >= SIZEOF_INTERP_FRAME &&
+                remote_ptr >= base &&
+                remote_ptr <= base + payload - SIZEOF_INTERP_FRAME) {
             return (char *)chunks->chunks[i].local_copy + (remote_ptr - chunks->chunks[i].remote_addr);
         }
     }
@@ -2024,6 +2606,7 @@ parse_frame_from_chunks(
 ) {
     void *frame_ptr = find_frame_in_chunks(chunks, address);
     if (!frame_ptr) {
+        PyErr_Format(PyExc_RuntimeError, "Frame at address 0x%lx not found in stack chunks", address);
         set_exception_cause(unwinder, PyExc_RuntimeError, "Frame not found in stack chunks");
         return -1;
     }
@@ -2061,8 +2644,8 @@ populate_initial_state_data(
     uintptr_t *interpreter_state,
     uintptr_t *tstate
 ) {
-    uint64_t interpreter_state_list_head =
-        unwinder->debug_offsets.runtime_state.interpreters_head;
+    uintptr_t interpreter_state_list_head =
+        (uintptr_t)unwinder->debug_offsets.runtime_state.interpreters_head;
 
     uintptr_t address_of_interpreter_state;
     int bytes_read = _Py_RemoteDebug_PagedReadRemoteMemory(
@@ -2089,7 +2672,7 @@ populate_initial_state_data(
     }
 
     uintptr_t address_of_thread = address_of_interpreter_state +
-                    unwinder->debug_offsets.interpreter_state.threads_main;
+            (uintptr_t)unwinder->debug_offsets.interpreter_state.threads_main;
 
     if (_Py_RemoteDebug_PagedReadRemoteMemory(
             &unwinder->handle,
@@ -2113,7 +2696,7 @@ find_running_frame(
     if ((void*)address_of_thread != NULL) {
         int err = read_ptr(
             unwinder,
-            address_of_thread + unwinder->debug_offsets.thread_state.current_frame,
+            address_of_thread + (uintptr_t)unwinder->debug_offsets.thread_state.current_frame,
             frame);
         if (err) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read current frame pointer");
@@ -2285,7 +2868,7 @@ append_awaited_by_for_thread(
         }
 
         uintptr_t task_addr = (uintptr_t)GET_MEMBER(uintptr_t, task_node, unwinder->debug_offsets.llist_node.next)
-            - unwinder->async_debug_offsets.asyncio_task_object.task_node;
+            - (uintptr_t)unwinder->async_debug_offsets.asyncio_task_object.task_node;
 
         if (process_single_task_node(unwinder, task_addr, NULL, result) < 0) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to process task node in awaited_by");
@@ -2428,7 +3011,7 @@ unwind_stack_for_thread(
 
     char ts[SIZEOF_THREAD_STATE];
     int bytes_read = _Py_RemoteDebug_PagedReadRemoteMemory(
-        &unwinder->handle, *current_tstate, unwinder->debug_offsets.thread_state.size, ts);
+        &unwinder->handle, *current_tstate, (size_t)unwinder->debug_offsets.thread_state.size, ts);
     if (bytes_read < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read thread state");
         goto error;
@@ -2573,7 +3156,14 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
 
     // Try to read async debug offsets, but don't fail if they're not available
     self->async_debug_offsets_available = 1;
-    if (read_async_debug(self) < 0) {
+    int async_debug_result = read_async_debug(self);
+    if (async_debug_result == PY_REMOTE_DEBUG_INVALID_ASYNC_DEBUG_OFFSETS) {
+        return -1;
+    }
+    if (async_debug_result < 0) {
+        if (_Py_RemoteDebug_HasPermissionError()) {
+            return -1;
+        }
         PyErr_Clear();
         memset(&self->async_debug_offsets, 0, sizeof(self->async_debug_offsets));
         self->async_debug_offsets_available = 0;
@@ -2733,6 +3323,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
     }
 
     while (current_tstate != 0) {
+        uintptr_t prev_tstate = current_tstate;
         PyObject* frame_info = unwind_stack_for_thread(self, &current_tstate);
         if (!frame_info) {
             Py_CLEAR(result);
@@ -2747,6 +3338,16 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
             goto exit;
         }
         Py_DECREF(frame_info);
+
+        if (current_tstate == prev_tstate) {
+            PyErr_Format(PyExc_RuntimeError,
+                "Thread list cycle detected at address 0x%lx (corrupted remote memory)",
+                current_tstate);
+            set_exception_cause(self, PyExc_RuntimeError,
+                "Thread list cycle detected (corrupted remote memory)");
+            Py_CLEAR(result);
+            goto exit;
+        }
 
         // We are targeting a single tstate, break here
         if (self->tstate_addr) {
@@ -2830,7 +3431,7 @@ _remote_debugging_RemoteUnwinder_get_all_awaited_by_impl(RemoteUnwinderObject *s
     }
 
     uintptr_t head_addr = self->interpreter_addr
-        + self->async_debug_offsets.asyncio_interpreter_state.asyncio_tasks_head;
+        + (uintptr_t)self->async_debug_offsets.asyncio_interpreter_state.asyncio_tasks_head;
 
     // On top of a per-thread task lists used by default by asyncio to avoid
     // contention, there is also a fallback per-interpreter list of tasks;

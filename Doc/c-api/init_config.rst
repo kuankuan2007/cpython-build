@@ -102,7 +102,7 @@ Error Handling
    * Set *\*err_msg* and return ``1`` if an error is set.
    * Set *\*err_msg* to ``NULL`` and return ``0`` otherwise.
 
-   An error message is an UTF-8 encoded string.
+   An error message is a UTF-8 encoded string.
 
    If *config* has an exit code, format the exit code as an error
    message.
@@ -544,9 +544,9 @@ Configuration Options
 
 Visibility:
 
-* Public: Can by get by :c:func:`PyConfig_Get` and set by
+* Public: Can be retrieved by :c:func:`PyConfig_Get` and set by
   :c:func:`PyConfig_Set`.
-* Read-only: Can by get by :c:func:`PyConfig_Get`, but cannot be set by
+* Read-only: Can be retrieved by :c:func:`PyConfig_Get`, but cannot be set by
   :c:func:`PyConfig_Set`.
 
 
@@ -622,6 +622,10 @@ Some options are read from the :mod:`sys` attributes. For example, the option
    .. audit-event:: cpython.PyConfig_Set name,value c.PyConfig_Set
 
    .. versionadded:: 3.14
+
+   .. versionchanged:: 3.14.7
+      The function now replaces :data:`sys.flags` (create a new object),
+      instead of modifying :data:`sys.flags` in-place.
 
 
 .. _pyconfig_api:
@@ -1155,7 +1159,7 @@ PyConfig
 
    Most ``PyConfig`` methods :ref:`preinitialize Python <c-preinit>` if needed.
    In that case, the Python preinitialization configuration
-   (:c:type:`PyPreConfig`) in based on the :c:type:`PyConfig`. If configuration
+   (:c:type:`PyPreConfig`) is based on the :c:type:`PyConfig`. If configuration
    fields which are in common with :c:type:`PyPreConfig` are tuned, they must
    be set before calling a :c:type:`PyConfig` method:
 
@@ -1233,9 +1237,9 @@ PyConfig
 
    .. c:member:: wchar_t* base_executable
 
-      Python base executable: :data:`sys._base_executable`.
+      Python base executable: ``sys._base_executable``.
 
-      Set by the :envvar:`__PYVENV_LAUNCHER__` environment variable.
+      Set by the ``__PYVENV_LAUNCHER__`` environment variable.
 
       Set from :c:member:`PyConfig.executable` if ``NULL``.
 
@@ -1741,7 +1745,7 @@ PyConfig
 
       * On macOS, use :envvar:`PYTHONEXECUTABLE` environment variable if set.
       * If the ``WITH_NEXT_FRAMEWORK`` macro is defined, use
-        :envvar:`__PYVENV_LAUNCHER__` environment variable if set.
+        ``__PYVENV_LAUNCHER__`` environment variable if set.
       * Use ``argv[0]`` of :c:member:`~PyConfig.argv` if available and
         non-empty.
       * Otherwise, use ``L"python"`` on Windows, or ``L"python3"`` on other
@@ -1977,8 +1981,7 @@ PyConfig
 
       The :mod:`warnings` module adds :data:`sys.warnoptions` in the reverse
       order: the last :c:member:`PyConfig.warnoptions` item becomes the first
-      item of :data:`warnings.filters` which is checked first (highest
-      priority).
+      item of ``warnings.filters`` which is checked first (highest priority).
 
       The :option:`-W` command line options adds its value to
       :c:member:`~PyConfig.warnoptions`, it can be used multiple times.

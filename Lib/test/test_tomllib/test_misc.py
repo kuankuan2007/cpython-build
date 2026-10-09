@@ -93,6 +93,7 @@ class TestMiscellaneous(unittest.TestCase):
         }
         self.assertEqual(obj_copy, expected_obj)
 
+    @support.skip_if_unlimited_stack_size
     def test_inline_array_recursion_limit(self):
         with support.infinite_recursion(max_depth=100):
             available = support.get_recursion_available()
@@ -104,6 +105,7 @@ class TestMiscellaneous(unittest.TestCase):
                 recursive_array_toml = "arr = " + nest_count * "[" + nest_count * "]"
                 tomllib.loads(recursive_array_toml)
 
+    @support.skip_if_unlimited_stack_size
     def test_inline_table_recursion_limit(self):
         with support.infinite_recursion(max_depth=100):
             available = support.get_recursion_available()
@@ -114,6 +116,19 @@ class TestMiscellaneous(unittest.TestCase):
                               nest_count=nest_count):
                 recursive_table_toml = nest_count * "key = {" + nest_count * "}"
                 tomllib.loads(recursive_table_toml)
+
+    def test_key_recursion_limit(self):
+        nest_count = tomllib._parser.MAX_KEY_PARTS - 2
+        nested_key_toml = "a." * nest_count + "a = 1"
+        tomllib.loads(nested_key_toml)
+
+        nest_count = tomllib._parser.MAX_KEY_PARTS + 2
+        nested_key_toml = "a." * nest_count + "a = 1"
+        with self.assertRaisesRegex(
+            RecursionError,
+            r"TOML key has more than the allowed [0-9]+ parts",
+        ):
+            tomllib.loads(nested_key_toml)
 
     def test_types_import(self):
         """Test that `_types` module runs.

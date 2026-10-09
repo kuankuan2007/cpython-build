@@ -217,6 +217,9 @@ class StreamReaderProtocol(FlowControlMixin, protocols.Protocol):
         loop = self._loop
         self._transport = transport
         self._over_ssl = transport.get_extra_info('sslcontext') is not None
+        reader = self._stream_reader
+        if reader is not None:
+            reader._replace_transport(transport)
 
     def connection_made(self, transport):
         if self._reject_connection:
@@ -237,7 +240,17 @@ class StreamReaderProtocol(FlowControlMixin, protocols.Protocol):
         self._over_ssl = transport.get_extra_info('sslcontext') is not None
         if self._client_connected_cb is not None:
             writer = StreamWriter(transport, self, reader, self._loop)
-            res = self._client_connected_cb(reader, writer)
+            try:
+                res = self._client_connected_cb(reader, writer)
+            except Exception as exc:
+                self._loop.call_exception_handler({
+                    'message': 'Unhandled exception in client_connected_cb',
+                    'exception': exc,
+                    'transport': transport,
+                })
+                transport.close()
+                self._strong_reader = None
+                return
             if coroutines.iscoroutine(res):
                 def callback(task):
                     if task.cancelled():
@@ -477,6 +490,10 @@ class StreamReader:
         assert self._transport is None, 'Transport already set'
         self._transport = transport
 
+    def _replace_transport(self, transport):
+        assert self._transport is not None, 'Transport not set'
+        self._transport = transport
+
     def _maybe_resume_transport(self):
         if self._paused and len(self._buffer) <= self._limit:
             self._paused = False
@@ -541,17 +558,17 @@ class StreamReader:
             self._waiter = None
 
     async def readline(self):
-        """Read chunk of data from the stream until newline (b'\n') is found.
+        r"""Read chunk of data from the stream until newline (b'\n') is found.
 
-        On success, return chunk that ends with newline. If only partial
+        On success, return chunk that ends with newline.  If only partial
         line can be read due to EOF, return incomplete line without
-        terminating newline. When EOF was reached while no bytes read, empty
-        bytes object is returned.
+        terminating newline.  When EOF was reached while no bytes read,
+        empty bytes object is returned.
 
-        If limit is reached, ValueError will be raised. In that case, if
+        If limit is reached, ValueError will be raised.  In that case, if
         newline was found, complete line including newline will be removed
-        from internal buffer. Else, internal buffer will be cleared. Limit is
-        compared against part of the line without newline.
+        from internal buffer.  Else, internal buffer will be cleared.
+        Limit is compared against part of the line without newline.
 
         If stream was paused, this function will automatically resume it if
         needed.

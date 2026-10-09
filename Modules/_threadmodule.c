@@ -50,7 +50,7 @@ get_thread_state(PyObject *module)
 
 
 #ifdef MS_WINDOWS
-typedef HRESULT (WINAPI *PF_GET_THREAD_DESCRIPTION)(HANDLE, PCWSTR*);
+typedef HRESULT (WINAPI *PF_GET_THREAD_DESCRIPTION)(HANDLE, PWSTR*);
 typedef HRESULT (WINAPI *PF_SET_THREAD_DESCRIPTION)(HANDLE, PCWSTR);
 static PF_GET_THREAD_DESCRIPTION pGetThreadDescription = NULL;
 static PF_SET_THREAD_DESCRIPTION pSetThreadDescription = NULL;
@@ -690,6 +690,9 @@ PyThreadHandleObject_is_done(PyObject *op, PyObject *Py_UNUSED(dummy))
 {
     PyThreadHandleObject *self = PyThreadHandleObject_CAST(op);
     if (_PyEvent_IsSet(&self->handle->thread_is_exiting)) {
+        if (_PyOnceFlag_CallOnce(&self->handle->once, join_thread, self->handle) == -1) {
+            return NULL;
+        }
         Py_RETURN_TRUE;
     }
     else {
@@ -1212,7 +1215,7 @@ static PyObject *
 rlock_repr(PyObject *op)
 {
     rlockobject *self = rlockobject_CAST(op);
-    PyThread_ident_t owner = self->lock.thread;
+    PyThread_ident_t owner = FT_ATOMIC_LOAD_ULLONG_RELAXED(self->lock.thread);
     int locked = rlock_locked_impl(self);
     size_t count;
     if (locked) {
@@ -2144,9 +2147,10 @@ thread_stack_size(PyObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "|n:stack_size", &new_size))
         return NULL;
 
-    if (new_size < 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "size must be 0 or a positive value");
+    Py_ssize_t min_size = _PyOS_MIN_STACK_SIZE + SYSTEM_PAGE_SIZE;
+    if (new_size != 0 && new_size < min_size) {
+        PyErr_Format(PyExc_ValueError,
+                     "size must be at least %zi bytes", min_size);
         return NULL;
     }
 
@@ -2357,7 +2361,7 @@ thread_shutdown(PyObject *self, PyObject *args)
         struct llist_node *node;
         llist_for_each_safe(node, &state->shutdown_handles) {
             ThreadHandle *cur = llist_data(node, ThreadHandle, shutdown_node);
-            if (cur->ident != ident) {
+            if (ThreadHandle_ident(cur) != ident) {
                 ThreadHandle_incref(cur);
                 handle = cur;
                 break;
@@ -2471,7 +2475,9 @@ _thread__get_name_impl(PyObject *module)
     }
 
 #ifdef __sun
-    return PyUnicode_DecodeUTF8(name, strlen(name), "surrogateescape");
+    // gh-138004: Decode Solaris/Illumos (e.g. OpenIndiana) thread names
+    // from ASCII, since OpenIndiana only supports ASCII names.
+    return PyUnicode_DecodeASCII(name, strlen(name), "surrogateescape");
 #else
     return PyUnicode_DecodeFSDefault(name);
 #endif
@@ -2509,8 +2515,9 @@ _thread_set_name_impl(PyObject *module, PyObject *name_obj)
 {
 #ifndef MS_WINDOWS
 #ifdef __sun
-    // Solaris always uses UTF-8
-    const char *encoding = "utf-8";
+    // gh-138004: Encode Solaris/Illumos thread names to ASCII,
+    // since OpenIndiana does not support non-ASCII names.
+    const char *encoding = "ascii";
 #else
     // Encode the thread name to the filesystem encoding using the "replace"
     // error handler

@@ -85,117 +85,136 @@ typedef struct {
 } PyConfigSysSpec;
 
 typedef struct {
+    int *ptr;
+    int not;
+} PyConfigGlobalVar;
+
+typedef struct {
     const char *name;
     size_t offset;
     PyConfigMemberType type;
     PyConfigMemberVisibility visibility;
     PyConfigSysSpec sys;
+    PyConfigGlobalVar global_var;
 } PyConfigSpec;
 
-#define SPEC(MEMBER, TYPE, VISIBILITY, sys) \
+#define SPEC(MEMBER, TYPE, VISIBILITY, sys, global_var) \
     {#MEMBER, offsetof(PyConfig, MEMBER), \
-     PyConfig_MEMBER_##TYPE, PyConfig_MEMBER_##VISIBILITY, sys}
+     PyConfig_MEMBER_##TYPE, PyConfig_MEMBER_##VISIBILITY, sys, global_var}
 
 #define SYS_ATTR(name) {name, -1, NULL}
 #define SYS_FLAG_SETTER(index, setter) {NULL, index, setter}
 #define SYS_FLAG(index) SYS_FLAG_SETTER(index, NULL)
 #define NO_SYS SYS_ATTR(NULL)
 
+#define GLOBAL(ptr, not) {ptr, not}
+#define NO_GLOBAL GLOBAL(NULL, 0)
+
+// Ignore deprecations on global variables such as Py_IsolatedFlag
+_Py_COMP_DIAG_PUSH
+_Py_COMP_DIAG_IGNORE_DEPR_DECLS
+
 // Update _test_embed_set_config when adding new members
 static const PyConfigSpec PYCONFIG_SPEC[] = {
     // --- Public options -----------
 
-    SPEC(argv, WSTR_LIST, PUBLIC, SYS_ATTR("argv")),
-    SPEC(base_exec_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("base_exec_prefix")),
-    SPEC(base_executable, WSTR_OPT, PUBLIC, SYS_ATTR("_base_executable")),
-    SPEC(base_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("base_prefix")),
-    SPEC(bytes_warning, UINT, PUBLIC, SYS_FLAG(9)),
-    SPEC(cpu_count, INT, PUBLIC, NO_SYS),
-    SPEC(exec_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("exec_prefix")),
-    SPEC(executable, WSTR_OPT, PUBLIC, SYS_ATTR("executable")),
-    SPEC(inspect, BOOL, PUBLIC, SYS_FLAG(1)),
-    SPEC(int_max_str_digits, UINT, PUBLIC, NO_SYS),
-    SPEC(interactive, BOOL, PUBLIC, SYS_FLAG(2)),
-    SPEC(module_search_paths, WSTR_LIST, PUBLIC, SYS_ATTR("path")),
-    SPEC(optimization_level, UINT, PUBLIC, SYS_FLAG(3)),
-    SPEC(parser_debug, BOOL, PUBLIC, SYS_FLAG(0)),
-    SPEC(platlibdir, WSTR, PUBLIC, SYS_ATTR("platlibdir")),
-    SPEC(prefix, WSTR_OPT, PUBLIC, SYS_ATTR("prefix")),
-    SPEC(pycache_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("pycache_prefix")),
-    SPEC(quiet, BOOL, PUBLIC, SYS_FLAG(10)),
-    SPEC(stdlib_dir, WSTR_OPT, PUBLIC, SYS_ATTR("_stdlib_dir")),
-    SPEC(use_environment, BOOL, PUBLIC, SYS_FLAG_SETTER(7, config_sys_flag_not)),
-    SPEC(verbose, UINT, PUBLIC, SYS_FLAG(8)),
-    SPEC(warnoptions, WSTR_LIST, PUBLIC, SYS_ATTR("warnoptions")),
-    SPEC(write_bytecode, BOOL, PUBLIC, SYS_FLAG_SETTER(4, config_sys_flag_not)),
-    SPEC(xoptions, WSTR_LIST, PUBLIC, SYS_ATTR("_xoptions")),
+    SPEC(argv, WSTR_LIST, PUBLIC, SYS_ATTR("argv"), NO_GLOBAL),
+    SPEC(base_exec_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("base_exec_prefix"), NO_GLOBAL),
+    SPEC(base_executable, WSTR_OPT, PUBLIC, SYS_ATTR("_base_executable"), NO_GLOBAL),
+    SPEC(base_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("base_prefix"), NO_GLOBAL),
+    SPEC(bytes_warning, UINT, PUBLIC, SYS_FLAG(9), GLOBAL(&Py_BytesWarningFlag, 0)),
+    SPEC(cpu_count, INT, PUBLIC, NO_SYS, NO_GLOBAL),
+    SPEC(exec_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("exec_prefix"), NO_GLOBAL),
+    SPEC(executable, WSTR_OPT, PUBLIC, SYS_ATTR("executable"), NO_GLOBAL),
+    SPEC(inspect, BOOL, PUBLIC, SYS_FLAG(1), GLOBAL(&Py_InspectFlag, 0)),
+    SPEC(int_max_str_digits, UINT, PUBLIC, NO_SYS, NO_GLOBAL),
+    SPEC(interactive, BOOL, PUBLIC, SYS_FLAG(2), GLOBAL(&Py_InteractiveFlag, 0)),
+    SPEC(module_search_paths, WSTR_LIST, PUBLIC, SYS_ATTR("path"), NO_GLOBAL),
+    SPEC(optimization_level, UINT, PUBLIC, SYS_FLAG(3), GLOBAL(&Py_OptimizeFlag, 0)),
+    SPEC(parser_debug, BOOL, PUBLIC, SYS_FLAG(0), GLOBAL(&Py_DebugFlag, 0)),
+    SPEC(platlibdir, WSTR, PUBLIC, SYS_ATTR("platlibdir"), NO_GLOBAL),
+    SPEC(prefix, WSTR_OPT, PUBLIC, SYS_ATTR("prefix"), NO_GLOBAL),
+    SPEC(pycache_prefix, WSTR_OPT, PUBLIC, SYS_ATTR("pycache_prefix"), NO_GLOBAL),
+    SPEC(quiet, BOOL, PUBLIC, SYS_FLAG(10), GLOBAL(&Py_QuietFlag, 0)),
+    SPEC(stdlib_dir, WSTR_OPT, PUBLIC, SYS_ATTR("_stdlib_dir"), NO_GLOBAL),
+    SPEC(use_environment, BOOL, PUBLIC,
+         SYS_FLAG_SETTER(7, config_sys_flag_not), GLOBAL(&Py_IgnoreEnvironmentFlag, 1)),
+    SPEC(verbose, UINT, PUBLIC, SYS_FLAG(8), GLOBAL(&Py_VerboseFlag, 0)),
+    SPEC(warnoptions, WSTR_LIST, PUBLIC, SYS_ATTR("warnoptions"), NO_GLOBAL),
+    SPEC(write_bytecode, BOOL, PUBLIC, SYS_FLAG_SETTER(4, config_sys_flag_not),
+         GLOBAL(&Py_DontWriteBytecodeFlag, 1)),
+    SPEC(xoptions, WSTR_LIST, PUBLIC, SYS_ATTR("_xoptions"), NO_GLOBAL),
 
     // --- Read-only options -----------
 
 #ifdef Py_STATS
-    SPEC(_pystats, BOOL, READ_ONLY, NO_SYS),
+    SPEC(_pystats, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
 #endif
-    SPEC(buffered_stdio, BOOL, READ_ONLY, NO_SYS),
-    SPEC(check_hash_pycs_mode, WSTR, READ_ONLY, NO_SYS),
-    SPEC(code_debug_ranges, BOOL, READ_ONLY, NO_SYS),
-    SPEC(configure_c_stdio, BOOL, READ_ONLY, NO_SYS),
-    SPEC(dev_mode, BOOL, READ_ONLY, NO_SYS),  // sys.flags.dev_mode
-    SPEC(dump_refs, BOOL, READ_ONLY, NO_SYS),
-    SPEC(dump_refs_file, WSTR_OPT, READ_ONLY, NO_SYS),
+    SPEC(buffered_stdio, BOOL, READ_ONLY, NO_SYS,
+         GLOBAL(&Py_UnbufferedStdioFlag, 1)),
+    SPEC(check_hash_pycs_mode, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(code_debug_ranges, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(configure_c_stdio, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(dev_mode, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),  // sys.flags.dev_mode
+    SPEC(dump_refs, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(dump_refs_file, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
 #ifdef Py_GIL_DISABLED
-    SPEC(enable_gil, INT, READ_ONLY, NO_SYS),
-    SPEC(tlbc_enabled, INT, READ_ONLY, NO_SYS),
+    SPEC(enable_gil, INT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(tlbc_enabled, INT, READ_ONLY, NO_SYS, NO_GLOBAL),
 #endif
-    SPEC(faulthandler, BOOL, READ_ONLY, NO_SYS),
-    SPEC(filesystem_encoding, WSTR, READ_ONLY, NO_SYS),
-    SPEC(filesystem_errors, WSTR, READ_ONLY, NO_SYS),
-    SPEC(hash_seed, ULONG, READ_ONLY, NO_SYS),
-    SPEC(home, WSTR_OPT, READ_ONLY, NO_SYS),
-    SPEC(thread_inherit_context, INT, READ_ONLY, NO_SYS),
-    SPEC(context_aware_warnings, INT, READ_ONLY, NO_SYS),
-    SPEC(import_time, UINT, READ_ONLY, NO_SYS),
-    SPEC(install_signal_handlers, BOOL, READ_ONLY, NO_SYS),
-    SPEC(isolated, BOOL, READ_ONLY, NO_SYS),  // sys.flags.isolated
+    SPEC(faulthandler, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(filesystem_encoding, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(filesystem_errors, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(hash_seed, ULONG, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(home, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(thread_inherit_context, INT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(context_aware_warnings, INT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(import_time, UINT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(install_signal_handlers, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(isolated, BOOL, READ_ONLY, NO_SYS, GLOBAL(&Py_IsolatedFlag, 0)),  // sys.flags.isolated
 #ifdef MS_WINDOWS
-    SPEC(legacy_windows_stdio, BOOL, READ_ONLY, NO_SYS),
+    SPEC(legacy_windows_stdio, BOOL, READ_ONLY, NO_SYS,
+         GLOBAL(&Py_LegacyWindowsStdioFlag, 0)),
 #endif
-    SPEC(malloc_stats, BOOL, READ_ONLY, NO_SYS),
-    SPEC(orig_argv, WSTR_LIST, READ_ONLY, SYS_ATTR("orig_argv")),
-    SPEC(parse_argv, BOOL, READ_ONLY, NO_SYS),
-    SPEC(pathconfig_warnings, BOOL, READ_ONLY, NO_SYS),
-    SPEC(perf_profiling, UINT, READ_ONLY, NO_SYS),
-    SPEC(remote_debug, BOOL, READ_ONLY, NO_SYS),
-    SPEC(program_name, WSTR, READ_ONLY, NO_SYS),
-    SPEC(run_command, WSTR_OPT, READ_ONLY, NO_SYS),
-    SPEC(run_filename, WSTR_OPT, READ_ONLY, NO_SYS),
-    SPEC(run_module, WSTR_OPT, READ_ONLY, NO_SYS),
+    SPEC(malloc_stats, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(orig_argv, WSTR_LIST, READ_ONLY, SYS_ATTR("orig_argv"), NO_GLOBAL),
+    SPEC(parse_argv, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(pathconfig_warnings, BOOL, READ_ONLY, NO_SYS,
+         GLOBAL(&Py_FrozenFlag, 1)),
+    SPEC(perf_profiling, UINT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(remote_debug, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(program_name, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(run_command, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(run_filename, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(run_module, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
 #ifdef Py_DEBUG
-    SPEC(run_presite, WSTR_OPT, READ_ONLY, NO_SYS),
+    SPEC(run_presite, WSTR_OPT, READ_ONLY, NO_SYS, NO_GLOBAL),
 #endif
-    SPEC(safe_path, BOOL, READ_ONLY, NO_SYS),
-    SPEC(show_ref_count, BOOL, READ_ONLY, NO_SYS),
-    SPEC(site_import, BOOL, READ_ONLY, NO_SYS),  // sys.flags.no_site
-    SPEC(skip_source_first_line, BOOL, READ_ONLY, NO_SYS),
-    SPEC(stdio_encoding, WSTR, READ_ONLY, NO_SYS),
-    SPEC(stdio_errors, WSTR, READ_ONLY, NO_SYS),
-    SPEC(tracemalloc, UINT, READ_ONLY, NO_SYS),
-    SPEC(use_frozen_modules, BOOL, READ_ONLY, NO_SYS),
-    SPEC(use_hash_seed, BOOL, READ_ONLY, NO_SYS),
+    SPEC(safe_path, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(show_ref_count, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(site_import, BOOL, READ_ONLY, NO_SYS, GLOBAL(&Py_NoSiteFlag, 1)),  // sys.flags.no_site
+    SPEC(skip_source_first_line, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(stdio_encoding, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(stdio_errors, WSTR, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(tracemalloc, UINT, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(use_frozen_modules, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(use_hash_seed, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
 #ifdef __APPLE__
-    SPEC(use_system_logger, BOOL, READ_ONLY, NO_SYS),
+    SPEC(use_system_logger, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
 #endif
-    SPEC(user_site_directory, BOOL, READ_ONLY, NO_SYS),  // sys.flags.no_user_site
-    SPEC(warn_default_encoding, BOOL, READ_ONLY, NO_SYS),
+    SPEC(user_site_directory, BOOL, READ_ONLY, NO_SYS,
+         GLOBAL(&Py_NoUserSiteDirectory, 1)),  // sys.flags.no_user_site
+    SPEC(warn_default_encoding, BOOL, READ_ONLY, NO_SYS, NO_GLOBAL),
 
     // --- Init-only options -----------
 
-    SPEC(_config_init, UINT, INIT_ONLY, NO_SYS),
-    SPEC(_init_main, BOOL, INIT_ONLY, NO_SYS),
-    SPEC(_install_importlib, BOOL, INIT_ONLY, NO_SYS),
-    SPEC(_is_python_build, BOOL, INIT_ONLY, NO_SYS),
-    SPEC(module_search_paths_set, BOOL, INIT_ONLY, NO_SYS),
-    SPEC(pythonpath_env, WSTR_OPT, INIT_ONLY, NO_SYS),
-    SPEC(sys_path_0, WSTR_OPT, INIT_ONLY, NO_SYS),
+    SPEC(_config_init, UINT, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(_init_main, BOOL, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(_install_importlib, BOOL, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(_is_python_build, BOOL, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(module_search_paths_set, BOOL, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(pythonpath_env, WSTR_OPT, INIT_ONLY, NO_SYS, NO_GLOBAL),
+    SPEC(sys_path_0, WSTR_OPT, INIT_ONLY, NO_SYS, NO_GLOBAL),
 
     // Array terminator
     {NULL, 0, 0, 0, NO_SYS},
@@ -231,17 +250,24 @@ static const PyConfigSpec PYPRECONFIG_SPEC[] = {
     {NULL, 0, 0, 0, NO_SYS},
 };
 
+// End of ignoring deprecations on global variables
+_Py_COMP_DIAG_POP
+
 #undef SPEC
 #undef SYS_ATTR
 #undef SYS_FLAG_SETTER
 #undef SYS_FLAG
 #undef NO_SYS
+#undef GLOBAL
+#undef NO_GLOBAL
 
 
 // Forward declarations
-static PyObject*
-config_get(const PyConfig *config, const PyConfigSpec *spec,
-           int use_sys);
+static PyObject* config_get(const PyConfig *config, const PyConfigSpec *spec,
+                            int use_sys);
+static void initconfig_free_wstr(wchar_t *member);
+static void initconfig_free_wstr_list(PyWideStringList *list);
+static void initconfig_free_config(const PyConfig *config);
 
 
 /* --- Command line options --------------------------------------- */
@@ -299,9 +325,15 @@ arg ...: arguments passed to program in sys.argv[1:]\n\
 
 static const char usage_xoptions[] = "\
 The following implementation-specific options are available:\n\
+-X context_aware_warnings=[0|1]: if true (1) then the warnings module will\n\
+         use a context variables; if false (0) then the warnings module will\n\
+         use module globals, which is not concurrent-safe; set to true for\n\
+         free-threaded builds and false otherwise; also\n\
+         PYTHON_CONTEXT_AWARE_WARNINGS\n\
 -X cpu_count=N: override the return value of os.cpu_count();\n\
          -X cpu_count=default cancels overriding; also PYTHON_CPU_COUNT\n\
 -X dev : enable Python Development Mode; also PYTHONDEVMODE\n\
+-X disable-remote-debug: disable remote debugging; also PYTHON_DISABLE_REMOTE_DEBUG\n\
 -X faulthandler: dump the Python traceback on fatal errors;\n\
          also PYTHONFAULTHANDLER\n\
 -X frozen_modules=[on|off]: whether to use frozen modules; the default is \"on\"\n\
@@ -321,7 +353,6 @@ The following implementation-specific options are available:\n\
 -X perf: support the Linux \"perf\" profiler; also PYTHONPERFSUPPORT=1\n\
 -X perf_jit: support the Linux \"perf\" profiler with DWARF support;\n\
          also PYTHON_PERF_JIT_SUPPORT=1\n\
--X disable-remote-debug: disable remote debugging; also PYTHON_DISABLE_REMOTE_DEBUG\n\
 "
 #ifdef Py_DEBUG
 "-X presite=MOD: import this module before site; also PYTHON_PRESITE\n"
@@ -336,21 +367,17 @@ The following implementation-specific options are available:\n\
 "\
 -X showrefcount: output the total reference count and number of used\n\
          memory blocks when the program finishes or after each statement in\n\
-         the interactive interpreter; only works on debug builds\n"
+         the interactive interpreter; only works on debug builds\n\
+-X thread_inherit_context=[0|1]: enable (1) or disable (0) threads inheriting\n\
+         context vars by default; enabled by default in the free-threaded\n\
+         build and disabled otherwise; also PYTHON_THREAD_INHERIT_CONTEXT\n\
+"
 #ifdef Py_GIL_DISABLED
 "-X tlbc=[0|1]: enable (1) or disable (0) thread-local bytecode. Also\n\
          PYTHON_TLBC\n"
 #endif
 "\
--X thread_inherit_context=[0|1]: enable (1) or disable (0) threads inheriting\n\
-         context vars by default; enabled by default in the free-threaded\n\
-         build and disabled otherwise; also PYTHON_THREAD_INHERIT_CONTEXT\n\
--X context_aware_warnings=[0|1]: if true (1) then the warnings module will\n\
-         use a context variables; if false (0) then the warnings module will\n\
-         use module globals, which is not concurrent-safe; set to true for\n\
-         free-threaded builds and false otherwise; also\n\
-         PYTHON_CONTEXT_AWARE_WARNINGS\n\
--X tracemalloc[=N]: trace Python memory allocations; N sets a traceback limit\n \
+-X tracemalloc[=N]: trace Python memory allocations; N sets a traceback limit\n\
          of N frames (default: 1); also PYTHONTRACEMALLOC=N\n\
 -X utf8[=0|1]: enable (1) or disable (0) UTF-8 mode; also PYTHONUTF8\n\
 -X warn_default_encoding: enable opt-in EncodingWarning for 'encoding=None';\n\
@@ -360,34 +387,19 @@ The following implementation-specific options are available:\n\
 /* Envvars that don't have equivalent command-line options are listed first */
 static const char usage_envvars[] =
 "Environment variables that change behavior:\n"
-"PYTHONSTARTUP   : file executed on interactive startup (no default)\n"
-"PYTHONPATH      : '%lc'-separated list of directories prefixed to the\n"
-"                  default module search path.  The result is sys.path.\n"
-"PYTHONHOME      : alternate <prefix> directory (or <prefix>%lc<exec_prefix>).\n"
-"                  The default module search path uses %s.\n"
-"PYTHONPLATLIBDIR: override sys.platlibdir\n"
+"PYTHONASYNCIODEBUG: enable asyncio debug mode\n"
+"PYTHON_BASIC_REPL: use the traditional parser-based REPL\n"
+"PYTHONBREAKPOINT: if this variable is set to 0, it disables the default\n"
+"                  debugger.  It can be set to the callable of your debugger of\n"
+"                  choice.\n"
 "PYTHONCASEOK    : ignore case in 'import' statements (Windows)\n"
-"PYTHONIOENCODING: encoding[:errors] used for stdin/stdout/stderr\n"
-"PYTHONHASHSEED  : if this variable is set to 'random', a random value is used\n"
-"                  to seed the hashes of str and bytes objects.  It can also be\n"
-"                  set to an integer in the range [0,4294967295] to get hash\n"
-"                  values with a predictable seed.\n"
-"PYTHONMALLOC    : set the Python memory allocators and/or install debug hooks\n"
-"                  on Python memory allocators.  Use PYTHONMALLOC=debug to\n"
-"                  install debug hooks.\n"
-"PYTHONMALLOCSTATS: print memory allocator statistics\n"
 "PYTHONCOERCECLOCALE: if this variable is set to 0, it disables the locale\n"
 "                  coercion behavior.  Use PYTHONCOERCECLOCALE=warn to request\n"
 "                  display of locale coercion and locale compatibility warnings\n"
 "                  on stderr.\n"
-"PYTHONBREAKPOINT: if this variable is set to 0, it disables the default\n"
-"                  debugger.  It can be set to the callable of your debugger of\n"
-"                  choice.\n"
 "PYTHON_COLORS   : if this variable is set to 1, the interpreter will colorize\n"
 "                  various kinds of output.  Setting it to 0 deactivates\n"
 "                  this behavior.\n"
-"PYTHON_HISTORY  : the location of a .python_history file.\n"
-"PYTHONASYNCIODEBUG: enable asyncio debug mode\n"
 #ifdef Py_TRACE_REFS
 "PYTHONDUMPREFS  : dump objects and reference counts still alive after shutdown\n"
 "PYTHONDUMPREFSFILE: dump objects and reference counts to the specified file\n"
@@ -395,14 +407,31 @@ static const char usage_envvars[] =
 #ifdef __APPLE__
 "PYTHONEXECUTABLE: set sys.argv[0] to this value (macOS only)\n"
 #endif
+"PYTHONHASHSEED  : if this variable is set to 'random', a random value is used\n"
+"                  to seed the hashes of str and bytes objects.  It can also be\n"
+"                  set to an integer in the range [0,4294967295] to get hash\n"
+"                  values with a predictable seed.\n"
+"PYTHON_HISTORY  : the location of a .python_history file.\n"
+"PYTHONHOME      : alternate <prefix> directory (or <prefix>%lc<exec_prefix>).\n"
+"                  The default module search path uses %s.\n"
+"PYTHONIOENCODING: encoding[:errors] used for stdin/stdout/stderr\n"
 #ifdef MS_WINDOWS
 "PYTHONLEGACYWINDOWSFSENCODING: use legacy \"mbcs\" encoding for file system\n"
 "PYTHONLEGACYWINDOWSSTDIO: use legacy Windows stdio\n"
 #endif
+"PYTHONMALLOC    : set the Python memory allocators and/or install debug hooks\n"
+"                  on Python memory allocators.  Use PYTHONMALLOC=debug to\n"
+"                  install debug hooks.\n"
+"PYTHONMALLOCSTATS: print memory allocator statistics\n"
+"PYTHONPATH      : '%lc'-separated list of directories prefixed to the\n"
+"                  default module search path.  The result is sys.path.\n"
+"PYTHONPLATLIBDIR: override sys.platlibdir\n"
+"PYTHONSTARTUP   : file executed on interactive startup (no default)\n"
 "PYTHONUSERBASE  : defines the user base directory (site.USER_BASE)\n"
-"PYTHON_BASIC_REPL: use the traditional parser-based REPL\n"
 "\n"
 "These variables have equivalent command-line options (see --help for details):\n"
+"PYTHON_CONTEXT_AWARE_WARNINGS: if true (1), enable thread-safe warnings\n"
+"                  module behaviour (-X context_aware_warnings)\n"
 "PYTHON_CPU_COUNT: override the return value of os.cpu_count() (-X cpu_count)\n"
 "PYTHONDEBUG     : enable parser debug mode (-d)\n"
 "PYTHONDEVMODE   : enable Python Development Mode (-X dev)\n"
@@ -421,9 +450,9 @@ static const char usage_envvars[] =
 "                  (-X no_debug_ranges)\n"
 "PYTHONNOUSERSITE: disable user site directory (-s)\n"
 "PYTHONOPTIMIZE  : enable level 1 optimizations (-O)\n"
-"PYTHONPERFSUPPORT: support the Linux \"perf\" profiler (-X perf)\n"
 "PYTHON_PERF_JIT_SUPPORT: enable Linux \"perf\" profiler support with JIT\n"
 "                  (-X perf_jit)\n"
+"PYTHONPERFSUPPORT: support the Linux \"perf\" profiler (-X perf)\n"
 #ifdef Py_DEBUG
 "PYTHON_PRESITE: import this module before site (-X presite)\n"
 #endif
@@ -434,13 +463,11 @@ static const char usage_envvars[] =
 #ifdef Py_STATS
 "PYTHONSTATS     : turns on statistics gathering (-X pystats)\n"
 #endif
+"PYTHON_THREAD_INHERIT_CONTEXT: if true (1), threads inherit context vars\n"
+"                  (-X thread_inherit_context)\n"
 #ifdef Py_GIL_DISABLED
 "PYTHON_TLBC     : when set to 0, disables thread-local bytecode (-X tlbc)\n"
 #endif
-"PYTHON_THREAD_INHERIT_CONTEXT: if true (1), threads inherit context vars\n"
-"                   (-X thread_inherit_context)\n"
-"PYTHON_CONTEXT_AWARE_WARNINGS: if true (1), enable thread-safe warnings module\n"
-"                   behaviour (-X context_aware_warnings)\n"
 "PYTHONTRACEMALLOC: trace Python memory allocations (-X tracemalloc)\n"
 "PYTHONUNBUFFERED: disable stdout/stderr buffering (-u)\n"
 "PYTHONUTF8      : control the UTF-8 mode (-X utf8)\n"
@@ -499,7 +526,7 @@ _Py_COMP_DIAG_IGNORE_DEPR_DECLS
         do { \
             obj = (EXPR); \
             if (obj == NULL) { \
-                return NULL; \
+                goto fail; \
             } \
             int res = PyDict_SetItemString(dict, (KEY), obj); \
             Py_DECREF(obj); \
@@ -1843,7 +1870,9 @@ config_read_env_vars(PyConfig *config)
     _Py_get_env_flag(use_env, &config->parser_debug, "PYTHONDEBUG");
     _Py_get_env_flag(use_env, &config->verbose, "PYTHONVERBOSE");
     _Py_get_env_flag(use_env, &config->optimization_level, "PYTHONOPTIMIZE");
-    _Py_get_env_flag(use_env, &config->inspect, "PYTHONINSPECT");
+    if (!config->inspect && _Py_GetEnv(use_env, "PYTHONINSPECT")) {
+        config->inspect = 1;
+    }
 
     int dont_write_bytecode = 0;
     _Py_get_env_flag(use_env, &dont_write_bytecode, "PYTHONDONTWRITEBYTECODE");
@@ -2491,8 +2520,30 @@ config_init_stdio_encoding(PyConfig *config,
 
     /* Choose the default error handler based on the current locale. */
     if (config->stdio_encoding == NULL) {
-        status = config_get_locale_encoding(config, preconfig,
-                                            &config->stdio_encoding);
+#ifdef MS_WINDOWS
+        /* gh-86427: use the console code page.  Only one encoding can be
+           specified, so the output code page is used: it affects two
+           streams of three. */
+        UINT cp = config->legacy_windows_stdio ? GetConsoleOutputCP() : 0;
+        if (cp != 0) {
+            if (cp == CP_UTF8) {
+                status = PyConfig_SetString(config, &config->stdio_encoding,
+                                            L"utf-8");
+            }
+            else {
+                wchar_t encoding[20];
+                swprintf(encoding, Py_ARRAY_LENGTH(encoding), L"cp%u",
+                         (unsigned int)cp);
+                status = PyConfig_SetString(config, &config->stdio_encoding,
+                                            encoding);
+            }
+        }
+        else
+#endif
+        {
+            status = config_get_locale_encoding(config, preconfig,
+                                                &config->stdio_encoding);
+        }
         if (_PyStatus_EXCEPTION(status)) {
             return status;
         }
@@ -2835,7 +2886,7 @@ config_usage(int error, const wchar_t* program)
 static void
 config_envvars_usage(void)
 {
-    printf(usage_envvars, (wint_t)DELIM, (wint_t)DELIM, PYTHONHOMEHELP);
+    printf(usage_envvars, (wint_t)DELIM, PYTHONHOMEHELP, (wint_t)DELIM);
 }
 
 static void
@@ -3725,6 +3776,9 @@ PyInitConfig_Free(PyInitConfig *config)
     if (config == NULL) {
         return;
     }
+
+    initconfig_free_config(&config->config);
+    PyMem_RawFree(config->inittab);
     free(config->err_msg);
     free(config);
 }
@@ -4093,13 +4147,51 @@ PyInitConfig_SetStr(PyInitConfig *config, const char *name, const char* value)
 }
 
 
+static void
+initconfig_free_wstr(wchar_t *member)
+{
+    if (member) {
+        free(member);
+    }
+}
+
+
+static void
+initconfig_free_wstr_list(PyWideStringList *list)
+{
+    for (Py_ssize_t i = 0; i < list->length; i++) {
+        free(list->items[i]);
+    }
+    free(list->items);
+}
+
+
+static void
+initconfig_free_config(const PyConfig *config)
+{
+    const PyConfigSpec *spec = PYCONFIG_SPEC;
+    for (; spec->name != NULL; spec++) {
+        void *member = config_get_spec_member(config, spec);
+        if (spec->type == PyConfig_MEMBER_WSTR
+            || spec->type == PyConfig_MEMBER_WSTR_OPT)
+        {
+            wchar_t *wstr = *(wchar_t **)member;
+            initconfig_free_wstr(wstr);
+        }
+        else if (spec->type == PyConfig_MEMBER_WSTR_LIST) {
+            initconfig_free_wstr_list(member);
+        }
+    }
+}
+
+
 static int
-_PyWideStringList_FromUTF8(PyInitConfig *config, PyWideStringList *list,
-                           Py_ssize_t length, char * const *items)
+initconfig_set_str_list(PyInitConfig *config, PyWideStringList *list,
+                        Py_ssize_t length, char * const *items)
 {
     PyWideStringList wlist = _PyWideStringList_INIT;
     size_t size = sizeof(wchar_t*) * length;
-    wlist.items = (wchar_t **)PyMem_RawMalloc(size);
+    wlist.items = (wchar_t **)malloc(size);
     if (wlist.items == NULL) {
         config->status = _PyStatus_NO_MEMORY();
         return -1;
@@ -4108,14 +4200,14 @@ _PyWideStringList_FromUTF8(PyInitConfig *config, PyWideStringList *list,
     for (Py_ssize_t i = 0; i < length; i++) {
         wchar_t *arg = utf8_to_wstr(config, items[i]);
         if (arg == NULL) {
-            _PyWideStringList_Clear(&wlist);
+            initconfig_free_wstr_list(&wlist);
             return -1;
         }
         wlist.items[i] = arg;
         wlist.length++;
     }
 
-    _PyWideStringList_Clear(list);
+    initconfig_free_wstr_list(list);
     *list = wlist;
     return 0;
 }
@@ -4136,7 +4228,7 @@ PyInitConfig_SetStrList(PyInitConfig *config, const char *name,
         return -1;
     }
     PyWideStringList *list = raw_member;
-    if (_PyWideStringList_FromUTF8(config, list, length, items) < 0) {
+    if (initconfig_set_str_list(config, list, length, items) < 0) {
         return -1;
     }
 
@@ -4328,7 +4420,8 @@ config_get(const PyConfig *config, const PyConfigSpec *spec,
 
         if (strcmp(spec->name, "int_max_str_digits") == 0) {
             PyInterpreterState *interp = _PyInterpreterState_GET();
-            return PyLong_FromLong(interp->long_state.max_str_digits);
+            int maxdigits = _Py_atomic_load_int(&interp->long_state.max_str_digits);
+            return PyLong_FromLong(maxdigits);
         }
     }
 
@@ -4680,6 +4773,16 @@ PyConfig_Set(const char *name, PyObject *value)
 
     default:
         Py_UNREACHABLE();
+    }
+
+    // Set the global variable
+    if (spec->global_var.ptr != NULL) {
+        assert(has_int_value);
+        int value = int_value;
+        if (spec->global_var.not) {
+            value = !value;
+        }
+        *spec->global_var.ptr = value;
     }
 
     if (spec->sys.attr != NULL) {

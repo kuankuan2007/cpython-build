@@ -84,7 +84,7 @@ def _more_lines(console: code.InteractiveConsole, unicodetext: str) -> bool:
     src = _strip_final_indent(unicodetext)
     try:
         code = console.compile(src, "<stdin>", "single")
-    except (OverflowError, SyntaxError, ValueError):
+    except Exception:
         lines = src.splitlines(keepends=True)
         if len(lines) == 1:
             return False
@@ -125,7 +125,7 @@ def run_multiline_interactive_console(
         command = REPL_COMMANDS[statement]
         if callable(command):
             # Make sure that history does not change because of commands
-            with reader.suspend_history():
+            with reader.suspend_history(), reader.suspend_colorization():
                 command()
             return True
         return False
@@ -158,6 +158,7 @@ def run_multiline_interactive_console(
             input_n += 1
         except KeyboardInterrupt:
             r = _get_reader()
+            r.cmpltn_reset()
             if r.input_trans is r.isearch_trans:
                 r.do_cmd(("isearch-end", [""]))
             r.pos = len(r.get_unicode())

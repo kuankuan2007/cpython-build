@@ -10,6 +10,7 @@ Copyright (c) Corporation for National Research Initiatives.
 
 #include "Python.h"
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
+#include "pycore_initconfig.h"    // _Py_DumpPathConfig()
 #include "pycore_interp.h"        // PyInterpreterState.codec_search_path
 #include "pycore_pyerrors.h"      // _PyErr_FormatNote()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
@@ -1204,7 +1205,7 @@ get_standard_encoding_impl(const char *encoding, int *bytelength)
             }
         }
     }
-    else if (strcmp(encoding, "CP_UTF8") == 0) {
+    else if (strcmp(encoding, "cp65001") == 0) {
         *bytelength = 3;
         return ENC_UTF8;
     }
@@ -1691,6 +1692,8 @@ _PyCodec_InitRegistry(PyInterpreterState *interp)
     // search functions, so this is done after everything else is initialized.
     PyObject *mod = PyImport_ImportModule("encodings");
     if (mod == NULL) {
+        PyThreadState *tstate = _PyThreadState_GET();
+        _Py_DumpPathConfig(tstate);
         return PyStatus_Error("Failed to import encodings module");
     }
     Py_DECREF(mod);

@@ -1942,7 +1942,7 @@ _validate_inner(SRE_CODE *code, SRE_CODE *end, Py_ssize_t groups)
                sre_match() code is robust even if they don't, and the worst
                you can get is nonsensical match results. */
             GET_ARG;
-            if (arg > 2 * (size_t)groups + 1) {
+            if (arg >= 2 * (size_t)groups) {
                 VTRACE(("arg=%d, groups=%d\n", (int)arg, (int)groups));
                 FAIL;
             }
@@ -2355,7 +2355,7 @@ match_getindex(MatchObject* self, PyObject* index)
     }
 
     // Check that i*2 cannot overflow to make static analyzers happy
-    assert(i <= SRE_MAXGROUPS);
+    assert((size_t)i <= SRE_MAXGROUPS);
     return i;
 }
 
@@ -2835,20 +2835,25 @@ scanner_dealloc(PyObject *self)
 static int
 scanner_begin(ScannerObject* self)
 {
-    if (self->executing) {
+#ifdef Py_GIL_DISABLED
+    int was_executing = _Py_atomic_exchange_int(&self->executing, 1);
+#else
+    int was_executing = self->executing;
+    self->executing = 1;
+#endif
+    if (was_executing) {
         PyErr_SetString(PyExc_ValueError,
                         "regular expression scanner already executing");
         return 0;
     }
-    self->executing = 1;
     return 1;
 }
 
 static void
 scanner_end(ScannerObject* self)
 {
-    assert(self->executing);
-    self->executing = 0;
+    assert(FT_ATOMIC_LOAD_INT_RELAXED(self->executing));
+    FT_ATOMIC_STORE_INT(self->executing, 0);
 }
 
 /*[clinic input]
@@ -3172,7 +3177,7 @@ static PyMethodDef pattern_methods[] = {
     _SRE_SRE_PATTERN___DEEPCOPY___METHODDEF
     _SRE_SRE_PATTERN__FAIL_AFTER_METHODDEF
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     PyDoc_STR("Patterns are generic over the type of string they handle (str or bytes)")},
     {NULL, NULL}
 };
 
@@ -3228,7 +3233,7 @@ static PyMethodDef match_methods[] = {
     _SRE_SRE_MATCH___COPY___METHODDEF
     _SRE_SRE_MATCH___DEEPCOPY___METHODDEF
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     PyDoc_STR("Matches are generic over the type of string which was matched (str or bytes)")},
     {NULL, NULL}
 };
 

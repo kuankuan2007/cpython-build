@@ -10,10 +10,10 @@
 
 --------------
 
-The :mod:`binascii` module contains a number of methods to convert between
+The :mod:`!binascii` module contains a number of methods to convert between
 binary and various ASCII-encoded binary representations. Normally, you will not
 use these functions directly but use wrapper modules like
-:mod:`base64` instead. The :mod:`binascii` module contains
+:mod:`base64` instead. The :mod:`!binascii` module contains
 low-level functions written in C for greater speed that are used by the
 higher-level modules.
 
@@ -28,7 +28,7 @@ higher-level modules.
       ASCII-only unicode strings are now accepted by the ``a2b_*`` functions.
 
 
-The :mod:`binascii` module defines the following functions:
+The :mod:`!binascii` module defines the following functions:
 
 
 .. function:: a2b_uu(string)
@@ -158,9 +158,8 @@ The :mod:`binascii` module defines the following functions:
    of hexadecimal digits (which can be upper or lower case), otherwise an
    :exc:`Error` exception is raised.
 
-   Similar functionality (accepting only text string arguments, but more
-   liberal towards whitespace) is also accessible using the
-   :meth:`bytes.fromhex` class method.
+   Similar functionality (but more liberal towards whitespace) is also accessible
+   using the :meth:`bytes.fromhex` class method.
 
 .. exception:: Error
 

@@ -34,6 +34,9 @@ Lib/test/xmltestdata/*                     noeol
 Lib/venv/scripts/common/activate text eol=lf
 Lib/venv/scripts/posix/* text eol=lf
 
+# Prevent GitHub's web conflict editor from converting LF to CRLF
+*.rst text eol=lf
+
 # CRLF files
 [attr]dos text eol=crlf
 
@@ -76,13 +79,16 @@ Include/internal/pycore_ast_state.h                 generated
 Include/internal/pycore_opcode.h                    generated
 Include/internal/pycore_opcode_metadata.h           generated
 Include/internal/pycore_*_generated.h               generated
+Include/internal/pycore_token.h                     generated
 Include/internal/pycore_uop_ids.h                   generated
 Include/internal/pycore_uop_metadata.h              generated
 Include/opcode.h                                    generated
 Include/opcode_ids.h                                generated
-Include/token.h                                     generated
 Lib/_opcode_metadata.py                             generated
+Lib/idlelib/help.html                               generated
 Lib/keyword.py                                      generated
+Lib/pydoc_data/topics.py                            generated
+Lib/pydoc_data/module_docs.py                       generated
 Lib/test/certdata/*.pem                             generated
 Lib/test/certdata/*.0                               generated
 Lib/test/levenshtein_examples.json                  generated
@@ -103,3 +109,5 @@ Python/stdlib_module_names.h                        generated
 Tools/peg_generator/pegen/grammar_parser.py         generated
 aclocal.m4                                          generated
 configure                                           generated
+*.min.js                                            generated
+package-lock.json                                   generated

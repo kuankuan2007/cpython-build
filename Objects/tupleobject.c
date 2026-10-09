@@ -118,7 +118,7 @@ int
 PyTuple_SetItem(PyObject *op, Py_ssize_t i, PyObject *newitem)
 {
     PyObject **p;
-    if (!PyTuple_Check(op) || Py_REFCNT(op) != 1) {
+    if (!PyTuple_Check(op) || !_PyObject_IsUniquelyReferenced(op)) {
         Py_XDECREF(newitem);
         PyErr_BadInternalCall();
         return -1;
@@ -156,6 +156,18 @@ _PyTuple_MaybeUntrack(PyObject *op)
     _PyObject_GC_UNTRACK(op);
 }
 
+/* Fast, but conservative check if an object maybe tracked
+   May return true for an object that is not tracked,
+   Will always return true for an object that is tracked.
+   This is a temporary workaround until _PyObject_GC_IS_TRACKED
+   becomes fast and safe to call on non-GC objects.
+*/
+static bool
+maybe_tracked(PyObject *ob)
+{
+    return _PyType_IS_GC(Py_TYPE(ob));
+}
+
 PyObject *
 PyTuple_Pack(Py_ssize_t n, ...)
 {
@@ -163,6 +175,7 @@ PyTuple_Pack(Py_ssize_t n, ...)
     PyObject *o;
     PyObject **items;
     va_list vargs;
+    bool track = false;
 
     if (n == 0) {
         return tuple_get_empty();
@@ -177,10 +190,15 @@ PyTuple_Pack(Py_ssize_t n, ...)
     items = result->ob_item;
     for (i = 0; i < n; i++) {
         o = va_arg(vargs, PyObject *);
+        if (!track && maybe_tracked(o)) {
+            track = true;
+        }
         items[i] = Py_NewRef(o);
     }
     va_end(vargs);
-    _PyObject_GC_TRACK(result);
+    if (track) {
+        _PyObject_GC_TRACK(result);
+    }
     return (PyObject *)result;
 }
 
@@ -377,11 +395,17 @@ _PyTuple_FromArray(PyObject *const *src, Py_ssize_t n)
         return NULL;
     }
     PyObject **dst = tuple->ob_item;
+    bool track = false;
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject *item = src[i];
+        if (!track && maybe_tracked(item)) {
+            track = true;
+        }
         dst[i] = Py_NewRef(item);
     }
-    _PyObject_GC_TRACK(tuple);
+    if (track) {
+        _PyObject_GC_TRACK(tuple);
+    }
     return (PyObject *)tuple;
 }
 
@@ -396,10 +420,17 @@ _PyTuple_FromStackRefStealOnSuccess(const _PyStackRef *src, Py_ssize_t n)
         return NULL;
     }
     PyObject **dst = tuple->ob_item;
+    bool track = false;
     for (Py_ssize_t i = 0; i < n; i++) {
-        dst[i] = PyStackRef_AsPyObjectSteal(src[i]);
+        PyObject *item = PyStackRef_AsPyObjectSteal(src[i]);
+        if (!track && maybe_tracked(item)) {
+            track = true;
+        }
+        dst[i] = item;
     }
-    _PyObject_GC_TRACK(tuple);
+    if (track) {
+        _PyObject_GC_TRACK(tuple);
+    }
     return (PyObject *)tuple;
 }
 
@@ -844,11 +875,19 @@ tuple___getnewargs___impl(PyTupleObject *self)
     return Py_BuildValue("(N)", tuple_slice(self, 0, Py_SIZE(self)));
 }
 
+
+PyDoc_STRVAR(tuple_class_getitem_doc,
+"Tuples are generic over the types of their contents.\n\n\
+For example, use ``tuple[int, str]`` for a pair whose first element\n\
+is an int and second element is a string.\n\n\
+Tuples also support the form ``tuple[T, ...]`` to indicate\n\
+an arbitrary length tuple of elements of type T.");
+
 static PyMethodDef tuple_methods[] = {
     TUPLE___GETNEWARGS___METHODDEF
     TUPLE_INDEX_METHODDEF
     TUPLE_COUNT_METHODDEF
-    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS, PyDoc_STR("See PEP 585")},
+    {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS, tuple_class_getitem_doc},
     {NULL,              NULL}           /* sentinel */
 };
 
@@ -923,7 +962,7 @@ _PyTuple_Resize(PyObject **pv, Py_ssize_t newsize)
 
     v = (PyTupleObject *) *pv;
     if (v == NULL || !Py_IS_TYPE(v, &PyTuple_Type) ||
-        (Py_SIZE(v) != 0 && Py_REFCNT(v) != 1)) {
+        (Py_SIZE(v) != 0 && !_PyObject_IsUniquelyReferenced(*pv))) {
         *pv = 0;
         Py_XDECREF(v);
         PyErr_BadInternalCall();

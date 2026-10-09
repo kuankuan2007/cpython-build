@@ -225,11 +225,13 @@ The module defines the following user-callable items:
    properly implements the :const:`os.O_EXCL` flag for :func:`os.open`.  The
    file is readable and writable only by the creating user ID.  If the
    platform uses permission bits to indicate whether a file is executable,
-   the file is executable by no one.  The file descriptor is not inherited
-   by child processes.
+   the file is executable by no one.
+
+   The file descriptor is :ref:`not inherited by child processes <fd_inheritance>`.
 
    Unlike :func:`TemporaryFile`, the user of :func:`mkstemp` is responsible
-   for deleting the temporary file when done with it.
+   for closing the file descriptor (for example, using :func:`os.close`) and
+   deleting the temporary file (for example, using :func:`os.remove`).
 
    If *suffix* is not ``None``, the file name will end with that suffix,
    otherwise there will be no suffix.  :func:`mkstemp` does not put a dot
@@ -319,8 +321,11 @@ The module defines the following user-callable items:
 
    #. A platform-specific location:
 
-      * On Windows, the directories :file:`C:\\TEMP`, :file:`C:\\TMP`,
-        :file:`\\TEMP`, and :file:`\\TMP`, in that order.
+      * On Windows, the directories
+        :file:`%USERPROFILE%\\AppData\\Local\\Temp`,
+        :file:`%SYSTEMROOT%\\Temp`, :file:`C:\\TEMP`,
+        :file:`C:\\TMP`, :file:`\\TEMP`, and
+        :file:`\\TMP`, in that order.
 
       * On all other platforms, the directories :file:`/tmp`, :file:`/var/tmp`, and
         :file:`/usr/tmp`, in that order.
@@ -385,7 +390,7 @@ not surprise other unsuspecting code by changing global API behavior.
 Examples
 --------
 
-Here are some examples of typical usage of the :mod:`tempfile` module::
+Here are some examples of typical usage of the :mod:`!tempfile` module::
 
     >>> import tempfile
 

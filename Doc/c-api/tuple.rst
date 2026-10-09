@@ -48,7 +48,7 @@ Tuple Objects
 .. c:function:: Py_ssize_t PyTuple_Size(PyObject *p)
 
    Take a pointer to a tuple object, and return the size of that tuple.
-   On error, return ``-1`` and with an exception set.
+   On error, return ``-1`` with an exception set.
 
 
 .. c:function:: Py_ssize_t PyTuple_GET_SIZE(PyObject *p)
@@ -90,8 +90,9 @@ Tuple Objects
 
    .. note::
 
-      This function "steals" a reference to *o* and discards a reference to
-      an item already in the tuple at the affected position.
+      This function ":term:`steals <steal>`" a reference to *o* and discards
+      a reference to an item already in the tuple at the affected position
+      (unless it was NULL).
 
 
 .. c:function:: void PyTuple_SET_ITEM(PyObject *p, Py_ssize_t pos, PyObject *o)
@@ -104,7 +105,7 @@ Tuple Objects
 
    .. note::
 
-      This function "steals" a reference to *o*, and, unlike
+      This function ":term:`steals <steal>`" a reference to *o*, and, unlike
       :c:func:`PyTuple_SetItem`, does *not* discard a reference to any item that
       is being replaced; any reference in the tuple at position *pos* will be
       leaked.
@@ -244,7 +245,7 @@ type.
 
    .. note::
 
-      This function "steals" a reference to *o*.
+      This function ":term:`steals <steal>`" a reference to *o*.
 
 
 .. c:function:: void PyStructSequence_SET_ITEM(PyObject *p, Py_ssize_t *pos, PyObject *o)

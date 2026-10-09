@@ -8,7 +8,6 @@
 #include "pycore_codecs.h"        // _PyCodec_Fini()
 #include "pycore_critical_section.h" // _PyCriticalSection_Resume()
 #include "pycore_dtoa.h"          // _dtoa_state_INIT()
-#include "pycore_emscripten_trampoline.h" // _Py_EmscriptenTrampoline_Init()
 #include "pycore_freelist.h"      // _PyObject_ClearFreeLists()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
 #include "pycore_interpframe.h"   // _PyThreadState_HasStackSpace()
@@ -404,12 +403,12 @@ _Py_COMP_DIAG_POP
         &(runtime)->unicode_state.ids.mutex, \
         &(runtime)->imports.extensions.mutex, \
         &(runtime)->ceval.pending_mainthread.mutex, \
-        &(runtime)->ceval.sys_trace_profile_mutex, \
         &(runtime)->atexit.mutex, \
         &(runtime)->audit_hooks.mutex, \
         &(runtime)->allocators.mutex, \
         &(runtime)->_main_interpreter.types.mutex, \
         &(runtime)->_main_interpreter.code_state.mutex, \
+        &(runtime)->_main_interpreter.dict_state.watcher_mutex, \
     }
 
 static void
@@ -434,11 +433,6 @@ init_runtime(_PyRuntimeState *runtime,
     runtime->main_thread = PyThread_get_thread_ident();
 
     runtime->unicode_state.ids.next_index = unicode_next_index;
-
-#if defined(__EMSCRIPTEN__) && defined(PY_CALL_TRAMPOLINE)
-    _Py_EmscriptenTrampoline_Init(runtime);
-#endif
-
     runtime->_initialized = 1;
 }
 
@@ -572,16 +566,19 @@ _PyInterpreterState_Enable(_PyRuntimeState *runtime)
 static PyInterpreterState *
 alloc_interpreter(void)
 {
+    // Aligned allocation for PyInterpreterState.
+    // the first word of the memory block is used to store
+    // the original pointer to be used later to free the memory.
     size_t alignment = _Alignof(PyInterpreterState);
-    size_t allocsize = sizeof(PyInterpreterState) + alignment - 1;
+    size_t allocsize = sizeof(PyInterpreterState) + sizeof(void *) + alignment - 1;
     void *mem = PyMem_RawCalloc(1, allocsize);
     if (mem == NULL) {
         return NULL;
     }
-    PyInterpreterState *interp = _Py_ALIGN_UP(mem, alignment);
-    assert(_Py_IS_ALIGNED(interp, alignment));
-    interp->_malloced = mem;
-    return interp;
+    void *ptr = _Py_ALIGN_UP((char *)mem + sizeof(void *), alignment);
+    ((void **)ptr)[-1] = mem;
+    assert(_Py_IS_ALIGNED(ptr, alignment));
+    return ptr;
 }
 
 static void
@@ -596,7 +593,7 @@ free_interpreter(PyInterpreterState *interp)
             interp->obmalloc = NULL;
         }
         assert(_Py_IS_ALIGNED(interp, _Alignof(PyInterpreterState)));
-        PyMem_RawFree(interp->_malloced);
+        PyMem_RawFree(((void **)interp)[-1]);
     }
 }
 
@@ -674,8 +671,6 @@ init_interpreter(PyInterpreterState *interp,
         }
         interp->monitoring_tool_versions[t] = 0;
     }
-    interp->sys_profile_initialized = false;
-    interp->sys_trace_initialized = false;
     interp->_code_object_generation = 0;
     interp->jit = false;
     interp->executor_list_head = NULL;
@@ -699,6 +694,9 @@ init_interpreter(PyInterpreterState *interp,
         NULL,
         &alloc
     );
+    if (interp->open_stackrefs_table == NULL) {
+        return _PyStatus_NO_MEMORY();
+    }
 #  ifdef Py_STACKREF_CLOSE_DEBUG
     interp->closed_stackrefs_table = _Py_hashtable_new_full(
         _Py_hashtable_hash_ptr,
@@ -707,6 +705,9 @@ init_interpreter(PyInterpreterState *interp,
         NULL,
         &alloc
     );
+    if (interp->closed_stackrefs_table == NULL) {
+        return _PyStatus_NO_MEMORY();
+    }
 #  endif
     _Py_stackref_associate(interp, Py_None, PyStackRef_None);
     _Py_stackref_associate(interp, Py_False, PyStackRef_False);
@@ -869,10 +870,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
 
     Py_CLEAR(interp->audit_hooks);
 
-    // At this time, all the threads should be cleared so we don't need atomic
-    // operations for instrumentation_version or eval_breaker.
+    // gh-140257: Threads have already been cleared, but daemon threads may
+    // still access eval_breaker atomically via take_gil() right before they
+    // hang. Use an atomic store to prevent data races during finalization.
     interp->ceval.instrumentation_version = 0;
-    tstate->eval_breaker = 0;
+    _Py_atomic_store_uintptr(&tstate->eval_breaker, 0);
 
     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
         interp->monitors.tools[i] = 0;
@@ -882,8 +884,6 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
             Py_CLEAR(interp->monitoring_callables[t][e]);
         }
     }
-    interp->sys_profile_initialized = false;
-    interp->sys_trace_initialized = false;
     for (int t = 0; t < PY_MONITORING_TOOL_IDS; t++) {
         Py_CLEAR(interp->monitoring_tool_names[t]);
     }
@@ -914,7 +914,6 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
     _Py_ClearExecutorDeletionList(interp);
 #endif
     _PyAST_Fini(interp);
-    _PyWarnings_Fini(interp);
     _PyAtExit_Fini(interp);
 
     // All Python types must be destroyed before the last GC collection. Python
@@ -925,6 +924,9 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
     _PyGC_CollectNoFail(tstate);
     _PyGC_Fini(interp);
 
+    // Finalize warnings after last gc so that any finalizers can
+    // access warnings state
+    _PyWarnings_Fini(interp);
     /* We don't clear sysdict and builtins until the end of this function.
        Because clearing other attributes can execute arbitrary Python code
        which requires sysdict and builtins. */
@@ -1053,6 +1055,8 @@ PyInterpreterState_Delete(PyInterpreterState *interp)
     _Py_qsbr_fini(interp);
 
     _PyObject_FiniState(interp);
+
+    PyConfig_Clear(&interp->config);
 
     free_interpreter(interp);
 }
@@ -1502,6 +1506,8 @@ alloc_threadstate(PyInterpreterState *interp)
         }
         reset_threadstate(tstate);
     }
+    // Set the interpreter before any later initialization can fail.
+    tstate->base.interp = interp;
     return tstate;
 }
 
@@ -1578,6 +1584,7 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     tstate->datastack_chunk = NULL;
     tstate->datastack_top = NULL;
     tstate->datastack_limit = NULL;
+    tstate->datastack_cached_chunk = NULL;
     tstate->what_event = -1;
     tstate->current_executor = NULL;
     tstate->dict_global_version = 0;
@@ -1585,6 +1592,9 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     _tstate->c_stack_soft_limit = UINTPTR_MAX;
     _tstate->c_stack_top = 0;
     _tstate->c_stack_hard_limit = 0;
+
+    _tstate->c_stack_init_base = 0;
+    _tstate->c_stack_init_top = 0;
 
     _tstate->asyncio_running_loop = NULL;
     _tstate->asyncio_running_task = NULL;
@@ -1714,6 +1724,11 @@ clear_datastack(PyThreadState *tstate)
         _PyObject_VirtualFree(chunk, chunk->size);
         chunk = prev;
     }
+    if (tstate->datastack_cached_chunk != NULL) {
+        _PyObject_VirtualFree(tstate->datastack_cached_chunk,
+                              tstate->datastack_cached_chunk->size);
+        tstate->datastack_cached_chunk = NULL;
+    }
 }
 
 void
@@ -1793,22 +1808,14 @@ PyThreadState_Clear(PyThreadState *tstate)
           "PyThreadState_Clear: warning: thread still has a generator\n");
     }
 
-#ifdef Py_GIL_DISABLED
-    PyMutex_Lock(&_PyRuntime.ceval.sys_trace_profile_mutex);
-#endif
-
     if (tstate->c_profilefunc != NULL) {
-        tstate->interp->sys_profiling_threads--;
+        FT_ATOMIC_ADD_SSIZE(tstate->interp->sys_profiling_threads, -1);
         tstate->c_profilefunc = NULL;
     }
     if (tstate->c_tracefunc != NULL) {
-        tstate->interp->sys_tracing_threads--;
+        FT_ATOMIC_ADD_SSIZE(tstate->interp->sys_tracing_threads, -1);
         tstate->c_tracefunc = NULL;
     }
-
-#ifdef Py_GIL_DISABLED
-    PyMutex_Unlock(&_PyRuntime.ceval.sys_trace_profile_mutex);
-#endif
 
     Py_CLEAR(tstate->c_profileobj);
     Py_CLEAR(tstate->c_traceobj);
@@ -1823,16 +1830,23 @@ PyThreadState_Clear(PyThreadState *tstate)
     struct _Py_freelists *freelists = _Py_freelists_GET();
     _PyObject_ClearFreeLists(freelists, 1);
 
+    // Flush the thread's local GC allocation count to the global count
+    // before the thread state is cleared, otherwise the count is lost.
+    _PyThreadStateImpl *tstate_impl = (_PyThreadStateImpl *)tstate;
+    _Py_atomic_add_int(&tstate->interp->gc.young.count,
+                       (int)tstate_impl->gc.alloc_count);
+    tstate_impl->gc.alloc_count = 0;
+
     // Merge our thread-local refcounts into the type's own refcount and
     // free our local refcount array.
-    _PyObject_FinalizePerThreadRefcounts((_PyThreadStateImpl *)tstate);
+    _PyObject_FinalizePerThreadRefcounts(tstate_impl);
 
     // Remove ourself from the biased reference counting table of threads.
     _Py_brc_remove_thread(tstate);
 
     // Release our thread-local copies of the bytecode for reuse by another
     // thread
-    _Py_ClearTLBCIndex((_PyThreadStateImpl *)tstate);
+    _Py_ClearTLBCIndex(tstate_impl);
 #endif
 
     // Merge our queue of pointers to be freed into the interpreter queue.
@@ -2299,6 +2313,27 @@ _PyThreadState_SetShuttingDown(PyThreadState *tstate)
 #endif
 }
 
+#ifdef Py_GIL_DISABLED
+int
+_PyThreadState_TrySuspendDetached(PyThreadState *tstate)
+{
+    assert(tstate != _PyThreadState_GET());
+    int expected = _Py_THREAD_DETACHED;
+    return _Py_atomic_compare_exchange_int(&tstate->state, &expected,
+                                           _Py_THREAD_SUSPENDED);
+}
+
+void
+_PyThreadState_ResumeDetached(PyThreadState *tstate)
+{
+    assert(tstate != _PyThreadState_GET());
+    assert(_Py_atomic_load_int_relaxed(&tstate->state) == _Py_THREAD_SUSPENDED);
+    _Py_atomic_store_int(&tstate->state, _Py_THREAD_DETACHED);
+    // Wake the thread if it is parked in tstate_wait_attach().
+    _PyParkingLot_UnparkAll(&tstate->state);
+}
+#endif
+
 // Decrease stop-the-world counter of remaining number of threads that need to
 // pause. If we are the final thread to pause, notify the requesting thread.
 static void
@@ -2362,13 +2397,15 @@ stop_the_world(struct _stoptheworld_state *stw)
 {
     _PyRuntimeState *runtime = &_PyRuntime;
 
-    PyMutex_Lock(&stw->mutex);
+    // gh-137433: Acquire the rwmutex first to avoid deadlocks with daemon
+    // threads that may hang when blocked on lock acquisition.
     if (stw->is_global) {
         _PyRWMutex_Lock(&runtime->stoptheworld_mutex);
     }
     else {
         _PyRWMutex_RLock(&runtime->stoptheworld_mutex);
     }
+    PyMutex_Lock(&stw->mutex);
 
     HEAD_LOCK(runtime);
     stw->requested = 1;
@@ -2434,13 +2471,13 @@ start_the_world(struct _stoptheworld_state *stw)
     }
     stw->requester = NULL;
     HEAD_UNLOCK(runtime);
+    PyMutex_Unlock(&stw->mutex);
     if (stw->is_global) {
         _PyRWMutex_Unlock(&runtime->stoptheworld_mutex);
     }
     else {
         _PyRWMutex_RUnlock(&runtime->stoptheworld_mutex);
     }
-    PyMutex_Unlock(&stw->mutex);
 }
 #endif  // Py_GIL_DISABLED
 
@@ -2655,36 +2692,33 @@ _PyThread_CurrentFrames(void)
         return NULL;
     }
 
-    /* for i in all interpreters:
-     *     for t in all of i's thread states:
-     *          if t's frame isn't NULL, map t's id to its frame
+    /* for t in all of the current interpreter's thread states:
+     *     if t's frame isn't NULL, map t's id to its frame
      * Because these lists can mutate even when the GIL is held, we
      * need to grab head_mutex for the duration.
      */
-    _PyEval_StopTheWorldAll(runtime);
+    PyInterpreterState *interp = tstate->interp;
+    _PyEval_StopTheWorld(interp);
     HEAD_LOCK(runtime);
-    PyInterpreterState *i;
-    for (i = runtime->interpreters.head; i != NULL; i = i->next) {
-        _Py_FOR_EACH_TSTATE_UNLOCKED(i, t) {
-            _PyInterpreterFrame *frame = t->current_frame;
-            frame = _PyFrame_GetFirstComplete(frame);
-            if (frame == NULL) {
-                continue;
-            }
-            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
-            if (id == NULL) {
-                goto fail;
-            }
-            PyObject *frameobj = (PyObject *)_PyFrame_GetFrameObject(frame);
-            if (frameobj == NULL) {
-                Py_DECREF(id);
-                goto fail;
-            }
-            int stat = PyDict_SetItem(result, id, frameobj);
+    _Py_FOR_EACH_TSTATE_UNLOCKED(interp, t) {
+        _PyInterpreterFrame *frame = t->current_frame;
+        frame = _PyFrame_GetFirstComplete(frame);
+        if (frame == NULL) {
+            continue;
+        }
+        PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
+        if (id == NULL) {
+            goto fail;
+        }
+        PyObject *frameobj = (PyObject *)_PyFrame_GetFrameObject(frame);
+        if (frameobj == NULL) {
             Py_DECREF(id);
-            if (stat < 0) {
-                goto fail;
-            }
+            goto fail;
+        }
+        int stat = PyDict_SetItem(result, id, frameobj);
+        Py_DECREF(id);
+        if (stat < 0) {
+            goto fail;
         }
     }
     goto done;
@@ -2694,7 +2728,7 @@ fail:
 
 done:
     HEAD_UNLOCK(runtime);
-    _PyEval_StartTheWorldAll(runtime);
+    _PyEval_StartTheWorld(interp);
     return result;
 }
 
@@ -2720,35 +2754,32 @@ _PyThread_CurrentExceptions(void)
         return NULL;
     }
 
-    /* for i in all interpreters:
-     *     for t in all of i's thread states:
-     *          if t's frame isn't NULL, map t's id to its frame
+    /* for t in all of the current interpreter's thread states:
+     *     if t's frame isn't NULL, map t's id to its exception
      * Because these lists can mutate even when the GIL is held, we
      * need to grab head_mutex for the duration.
      */
-    _PyEval_StopTheWorldAll(runtime);
+    PyInterpreterState *interp = tstate->interp;
+    _PyEval_StopTheWorld(interp);
     HEAD_LOCK(runtime);
-    PyInterpreterState *i;
-    for (i = runtime->interpreters.head; i != NULL; i = i->next) {
-        _Py_FOR_EACH_TSTATE_UNLOCKED(i, t) {
-            _PyErr_StackItem *err_info = _PyErr_GetTopmostException(t);
-            if (err_info == NULL) {
-                continue;
-            }
-            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
-            if (id == NULL) {
-                goto fail;
-            }
-            PyObject *exc = err_info->exc_value;
-            assert(exc == NULL ||
-                   exc == Py_None ||
-                   PyExceptionInstance_Check(exc));
+    _Py_FOR_EACH_TSTATE_UNLOCKED(interp, t) {
+        _PyErr_StackItem *err_info = _PyErr_GetTopmostException(t);
+        if (err_info == NULL) {
+            continue;
+        }
+        PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
+        if (id == NULL) {
+            goto fail;
+        }
+        PyObject *exc = err_info->exc_value;
+        assert(exc == NULL ||
+               exc == Py_None ||
+               PyExceptionInstance_Check(exc));
 
-            int stat = PyDict_SetItem(result, id, exc == NULL ? Py_None : exc);
-            Py_DECREF(id);
-            if (stat < 0) {
-                goto fail;
-            }
+        int stat = PyDict_SetItem(result, id, exc == NULL ? Py_None : exc);
+        Py_DECREF(id);
+        if (stat < 0) {
+            goto fail;
         }
     }
     goto done;
@@ -2758,7 +2789,7 @@ fail:
 
 done:
     HEAD_UNLOCK(runtime);
-    _PyEval_StartTheWorldAll(runtime);
+    _PyEval_StartTheWorld(interp);
     return result;
 }
 
@@ -3028,9 +3059,20 @@ push_chunk(PyThreadState *tstate, int size)
     while (allocate_size < (int)sizeof(PyObject*)*(size + MINIMUM_OVERHEAD)) {
         allocate_size *= 2;
     }
-    _PyStackChunk *new = allocate_chunk(allocate_size, tstate->datastack_chunk);
-    if (new == NULL) {
-        return NULL;
+    _PyStackChunk *new;
+    if (tstate->datastack_cached_chunk != NULL
+        && (size_t)allocate_size <= tstate->datastack_cached_chunk->size)
+    {
+        new = tstate->datastack_cached_chunk;
+        tstate->datastack_cached_chunk = NULL;
+        new->previous = tstate->datastack_chunk;
+        new->top = 0;
+    }
+    else {
+        new = allocate_chunk(allocate_size, tstate->datastack_chunk);
+        if (new == NULL) {
+            return NULL;
+        }
     }
     if (tstate->datastack_chunk) {
         tstate->datastack_chunk->top = tstate->datastack_top -
@@ -3066,12 +3108,17 @@ _PyThreadState_PopFrame(PyThreadState *tstate, _PyInterpreterFrame * frame)
     if (base == &tstate->datastack_chunk->data[0]) {
         _PyStackChunk *chunk = tstate->datastack_chunk;
         _PyStackChunk *previous = chunk->previous;
+        _PyStackChunk *cached = tstate->datastack_cached_chunk;
         // push_chunk ensures that the root chunk is never popped:
         assert(previous);
         tstate->datastack_top = &previous->data[previous->top];
         tstate->datastack_chunk = previous;
-        _PyObject_VirtualFree(chunk, chunk->size);
         tstate->datastack_limit = (PyObject **)(((char *)previous) + previous->size);
+        chunk->previous = NULL;
+        if (cached != NULL) {
+            _PyObject_VirtualFree(cached, cached->size);
+        }
+        tstate->datastack_cached_chunk = chunk;
     }
     else {
         assert(tstate->datastack_top);

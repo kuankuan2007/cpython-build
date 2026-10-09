@@ -144,10 +144,16 @@ class EnableDeferredRefcountingTest(unittest.TestCase):
     @support.requires_resource("cpu")
     def test_enable_deferred_refcount(self):
         from threading import Thread
+        import gc
 
         self.assertEqual(_testcapi.pyobject_enable_deferred_refcount("not tracked"), 0)
         foo = []
         self.assertEqual(_testcapi.pyobject_enable_deferred_refcount(foo), int(support.Py_GIL_DISABLED))
+
+        # The object must be tracked by the GC
+        not_gc_tracked = tuple([1, 2])
+        self.assertFalse(gc.is_tracked(not_gc_tracked))
+        self.assertEqual(_testcapi.pyobject_enable_deferred_refcount(not_gc_tracked), 0)
 
         # Make sure reference counting works on foo now
         self.assertEqual(foo, [])
@@ -246,6 +252,29 @@ class CAPITest(unittest.TestCase):
             self.assertFalse(_testcapi.pyobject_is_unique_temporary(x))
 
         func(object())
+
+        # Test that a newly created object in C is not considered
+        # a uniquely referenced temporary, because it's not on the stack.
+        # gh-142586: do the test in a loop over a list to test for handling
+        # tagged ints on the stack.
+        for i in [0, 1, 2]:
+            self.assertFalse(_testcapi.pyobject_is_unique_temporary_new_object())
+
+
+class RefTracerTest(unittest.TestCase):
+    @support.requires_resource('cpu')
+    @support.skip_emscripten_stack_overflow()
+    @support.skip_wasi_stack_overflow()
+    def test_destroy_traced_for_trashcan_deferred_objects(self):
+        depth = 200_000
+        chain = None
+        for _ in range(depth):
+            chain = [chain]
+        _testcapi.start_counting_list_destroys()
+        del chain
+        destroys = _testcapi.stop_counting_list_destroys()
+        self.assertEqual(destroys, depth)
+
 
 if __name__ == "__main__":
     unittest.main()

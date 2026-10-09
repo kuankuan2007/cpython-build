@@ -1743,6 +1743,13 @@ class MockTest(unittest.TestCase):
                 mock_method.assert_called_once_with()
                 self.assertRaises(TypeError, mock_method, 'extra_arg')
 
+    # gh-145754
+    def test_create_autospec_type_hints_typechecking(self):
+        def foo(x: Tuple[int, ...]) -> None:
+            pass
+
+        mock.create_autospec(foo)
+
     #Issue21238
     def test_mock_unsafe(self):
         m = Mock()
@@ -2100,6 +2107,15 @@ class MockTest(unittest.TestCase):
         self.assertEqual('', h.readline())
         self.assertEqual([], h.readlines())
         self.assertEqual([], h.readlines())
+
+    def test_mock_open_exit_with_contextlib_exit_stack(self):
+        # gh-150484: mock_open's __exit__ should work when called from
+        # contextlib.ExitStack, which passes (exctype, excinst, exctb).
+        from contextlib import ExitStack
+        with mock.patch('builtins.open', mock.mock_open()) as m:
+            with ExitStack() as exit_stack:
+                with exit_stack.enter_context(open('/tmp/test.txt', 'w')):
+                    pass
 
     def test_mock_parents(self):
         for Klass in Mock, MagicMock:

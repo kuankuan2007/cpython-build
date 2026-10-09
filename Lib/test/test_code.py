@@ -210,12 +210,11 @@ except ImportError:
     ctypes = None
 from test.support import (cpython_only,
                           check_impl_detail, requires_debug_ranges,
-                          gc_collect, Py_GIL_DISABLED)
+                          gc_collect, Py_GIL_DISABLED, late_deletion)
 from test.support.script_helper import assert_python_ok
 from test.support import threading_helper, import_helper
 from test.support.bytecode_helper import instructions_with_positions
 from opcode import opmap, opname
-from _testcapi import code_offset_to_line
 try:
     import _testinternalcapi
 except ModuleNotFoundError:
@@ -1485,6 +1484,8 @@ class CodeLocationTest(unittest.TestCase):
         rc, out, err = assert_python_ok('-OO', '-c', code)
 
     def test_co_branches(self):
+        _testcapi = import_helper.import_module("_testcapi")
+        code_offset_to_line = _testcapi.code_offset_to_line
 
         def get_line_branches(func):
             code = func.__code__
@@ -1555,6 +1556,11 @@ if check_impl_detail(cpython=True) and ctypes is not None:
 
     FREE_FUNC = freefunc(myfree)
     FREE_INDEX = RequestCodeExtraIndex(FREE_FUNC)
+    # Make sure myfree sticks around at least as long as the interpreter,
+    # since we (currently) can't unregister the function and leaving a
+    # dangling pointer will cause a crash on deallocation of code objects if
+    # something else uses co_extras, like test_capi.test_misc.
+    late_deletion(myfree)
 
     class CoExtra(unittest.TestCase):
         def get_func(self):

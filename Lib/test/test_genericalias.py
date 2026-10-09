@@ -55,15 +55,14 @@ from urllib.parse import SplitResult, ParseResult
 from unittest.case import _AssertRaisesContext
 from queue import Queue, SimpleQueue
 from weakref import WeakSet, ReferenceType, ref
-import typing
-from typing import Unpack
 try:
     from tkinter import Event
 except ImportError:
     Event = None
 from string.templatelib import Template, Interpolation
 
-from typing import TypeVar
+import typing
+from typing import TypeVar, Unpack
 T = TypeVar('T')
 K = TypeVar('K')
 V = TypeVar('V')
@@ -244,6 +243,56 @@ class BaseTest(unittest.TestCase):
         self.assertEndsWith(repr(MyGeneric[[]]), 'MyGeneric[[]]')
         self.assertEndsWith(repr(MyGeneric[[int, str]]), 'MyGeneric[[int, str]]')
 
+    def test_evil_repr1(self):
+        # gh-143635
+        class Zap:
+            def __init__(self, container):
+                self.container = container
+            def __getattr__(self, name):
+                if name == "__origin__":
+                    self.container.clear()
+                    return None
+                if name == "__args__":
+                    return ()
+                raise AttributeError
+
+        params = []
+        params.append(Zap(params))
+        alias = GenericAlias(list, (params,))
+        repr_str = repr(alias)
+        self.assertTrue(repr_str.startswith("list[["), repr_str)
+
+    def test_evil_repr2(self):
+        class Zap:
+            def __init__(self, container):
+                self.container = container
+            def __getattr__(self, name):
+                if name == "__qualname__":
+                    self.container.clear()
+                    return "abcd"
+                if name == "__module__":
+                    return None
+                raise AttributeError
+
+        params = []
+        params.append(Zap(params))
+        alias = GenericAlias(list, (params,))
+        repr_str = repr(alias)
+        self.assertTrue(repr_str.startswith("list[["), repr_str)
+
+    def test_evil_repr3(self):
+        # gh-143823
+        lst = []
+        class X:
+            def __repr__(self):
+                lst.clear()
+                return "x"
+
+        lst += [X(), 1]
+        ga = GenericAlias(int, lst)
+        with self.assertRaises(IndexError):
+            repr(ga)
+
     def test_exposed_type(self):
         import types
         a = types.GenericAlias(list, int)
@@ -402,7 +451,10 @@ class BaseTest(unittest.TestCase):
         aliases = [
             GenericAlias(list, T),
             GenericAlias(deque, T),
-            GenericAlias(X, T)
+            GenericAlias(X, T),
+            X[T],
+            list[T],
+            deque[T],
         ] + _UNPACKED_TUPLES
         for alias in aliases:
             with self.subTest(alias=alias):
@@ -432,10 +484,26 @@ class BaseTest(unittest.TestCase):
         self.assertEqual(a.__parameters__, (T,))
 
     def test_dir(self):
-        dir_of_gen_alias = set(dir(list[int]))
+        ga = list[int]
+        dir_of_gen_alias = set(dir(ga))
         self.assertTrue(dir_of_gen_alias.issuperset(dir(list)))
-        for generic_alias_property in ("__origin__", "__args__", "__parameters__"):
-            self.assertIn(generic_alias_property, dir_of_gen_alias)
+        for generic_alias_property in (
+            "__origin__", "__args__", "__parameters__",
+            "__unpacked__",
+        ):
+            with self.subTest(generic_alias_property=generic_alias_property):
+                self.assertIn(generic_alias_property, dir_of_gen_alias)
+        for blocked in (
+            "__bases__",
+            "__copy__",
+            "__deepcopy__",
+        ):
+            with self.subTest(blocked=blocked):
+                self.assertNotIn(blocked, dir_of_gen_alias)
+
+        for entry in dir_of_gen_alias:
+            with self.subTest(entry=entry):
+                getattr(ga, entry)  # must not raise `AttributeError`
 
     def test_weakref(self):
         for t in self.generic_types:
@@ -549,6 +617,14 @@ class BaseTest(unittest.TestCase):
         deeply_nested_specialized = deeply_nested[str, float]
         self.assertEqual(deeply_nested_specialized.__args__, ([str, [float], int], float))
         self.assertEqual(deeply_nested_specialized.__parameters__, ())
+
+    def test_gh150146(self):
+        # It used to crash:
+        for container in [memoryview, list, tuple]:
+            with self.subTest(container=container):
+                x = container[TypeVar("")]
+                with self.assertRaises(TypeError):
+                    x[*typing.Mapping[..., ...]]
 
 
 class TypeIterationTests(unittest.TestCase):

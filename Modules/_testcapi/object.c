@@ -16,6 +16,9 @@ call_pyobject_print(PyObject *self, PyObject * args)
     }
 
     fp = Py_fopen(filename, "w+");
+    if (fp == NULL) {
+        return NULL;
+    }
 
     if (Py_IsTrue(print_raw)) {
         flags = Py_PRINT_RAW;
@@ -32,16 +35,14 @@ call_pyobject_print(PyObject *self, PyObject * args)
 }
 
 static PyObject *
-pyobject_print_null(PyObject *self, PyObject *args)
+pyobject_print_null(PyObject *self, PyObject *filename)
 {
-    PyObject *filename;
     FILE *fp;
 
-    if (!PyArg_UnpackTuple(args, "call_pyobject_print", 1, 1, &filename)) {
+    fp = Py_fopen(filename, "w+");
+    if (fp == NULL) {
         return NULL;
     }
-
-    fp = Py_fopen(filename, "w+");
 
     if (PyObject_Print(NULL, fp, 0) < 0) {
         fclose(fp);
@@ -54,25 +55,28 @@ pyobject_print_null(PyObject *self, PyObject *args)
 }
 
 static PyObject *
-pyobject_print_noref_object(PyObject *self, PyObject *args)
+pyobject_print_noref_object(PyObject *self, PyObject *filename)
 {
     PyObject *test_string;
-    PyObject *filename;
     FILE *fp;
     char correct_string[100];
 
     test_string = PyUnicode_FromString("Spam spam spam");
+    if (test_string == NULL) {
+        return NULL;
+    }
 
     Py_SET_REFCNT(test_string, 0);
 
     PyOS_snprintf(correct_string, 100, "<refcnt %zd at %p>",
                   Py_REFCNT(test_string), (void *)test_string);
 
-    if (!PyArg_UnpackTuple(args, "call_pyobject_print", 1, 1, &filename)) {
+    fp = Py_fopen(filename, "w+");
+    if (fp == NULL) {
+        Py_SET_REFCNT(test_string, 1);
+        Py_DECREF(test_string);
         return NULL;
     }
-
-    fp = Py_fopen(filename, "w+");
 
     if (PyObject_Print(test_string, fp, 0) < 0){
         fclose(fp);
@@ -90,20 +94,22 @@ pyobject_print_noref_object(PyObject *self, PyObject *args)
 }
 
 static PyObject *
-pyobject_print_os_error(PyObject *self, PyObject *args)
+pyobject_print_os_error(PyObject *self, PyObject *filename)
 {
     PyObject *test_string;
-    PyObject *filename;
     FILE *fp;
 
     test_string = PyUnicode_FromString("Spam spam spam");
-
-    if (!PyArg_UnpackTuple(args, "call_pyobject_print", 1, 1, &filename)) {
+    if (test_string == NULL) {
         return NULL;
     }
 
     // open file in read mode to induce OSError
     fp = Py_fopen(filename, "r");
+    if (fp == NULL) {
+        Py_DECREF(test_string);
+        return NULL;
+    }
 
     if (PyObject_Print(test_string, fp, 0) < 0) {
         fclose(fp);
@@ -135,6 +141,15 @@ static PyObject *
 pyobject_is_unique_temporary(PyObject *self, PyObject *obj)
 {
     int result = PyUnstable_Object_IsUniqueReferencedTemporary(obj);
+    return PyLong_FromLong(result);
+}
+
+static PyObject *
+pyobject_is_unique_temporary_new_object(PyObject *self, PyObject *unused)
+{
+    PyObject *obj = PyList_New(0);
+    int result = PyUnstable_Object_IsUniqueReferencedTemporary(obj);
+    Py_DECREF(obj);
     return PyLong_FromLong(result);
 }
 
@@ -487,12 +502,13 @@ is_uniquely_referenced(PyObject *self, PyObject *op)
 
 static PyMethodDef test_methods[] = {
     {"call_pyobject_print", call_pyobject_print, METH_VARARGS},
-    {"pyobject_print_null", pyobject_print_null, METH_VARARGS},
-    {"pyobject_print_noref_object", pyobject_print_noref_object, METH_VARARGS},
-    {"pyobject_print_os_error", pyobject_print_os_error, METH_VARARGS},
+    {"pyobject_print_null", pyobject_print_null, METH_O},
+    {"pyobject_print_noref_object", pyobject_print_noref_object, METH_O},
+    {"pyobject_print_os_error", pyobject_print_os_error, METH_O},
     {"pyobject_clear_weakrefs_no_callbacks", pyobject_clear_weakrefs_no_callbacks, METH_O},
     {"pyobject_enable_deferred_refcount", pyobject_enable_deferred_refcount, METH_O},
     {"pyobject_is_unique_temporary", pyobject_is_unique_temporary, METH_O},
+    {"pyobject_is_unique_temporary_new_object", pyobject_is_unique_temporary_new_object, METH_NOARGS},
     {"test_py_try_inc_ref", test_py_try_inc_ref, METH_NOARGS},
     {"test_xincref_doesnt_leak",test_xincref_doesnt_leak,        METH_NOARGS},
     {"test_incref_doesnt_leak", test_incref_doesnt_leak,         METH_NOARGS},

@@ -6,11 +6,12 @@ if sys.platform != "win32":
 
 
 import itertools
+from _colorize import ANSIColors
 from functools import partial
 from test.support import force_not_colorized_test_class
 from typing import Iterable
 from unittest import TestCase
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 from .support import handle_all_events, code_to_events
 from .support import prepare_reader as default_prepare_reader
@@ -72,6 +73,20 @@ class WindowsConsoleTests(TestCase):
     def handle_events_height_3(self, events):
         return self.handle_events(events, height=3)
 
+    def test_no_newline(self):
+        code = "1"
+        events = code_to_events(code)
+        _, con = self.handle_events(events)
+        self.assertNotIn(call(b'\n'), con.out.write.mock_calls)
+        con.restore()
+
+    def test_newline(self):
+        code = "\n"
+        events = code_to_events(code)
+        _, con = self.handle_events(events)
+        con.out.write.assert_any_call(b"\n")
+        con.restore()
+
     def test_simple_addition(self):
         code = "12+34"
         events = code_to_events(code)
@@ -101,9 +116,7 @@ class WindowsConsoleTests(TestCase):
         events = code_to_events(code)
         reader, console = self.handle_events_narrow(events)
 
-        console.height = 20
-        console.width = 80
-        console.getheightwidth = MagicMock(lambda _: (20, 80))
+        console.getheightwidth = MagicMock(side_effect=lambda: (20, 80))
 
         def same_reader(_):
             return reader
@@ -129,9 +142,7 @@ class WindowsConsoleTests(TestCase):
         events = code_to_events(code)
         reader, console = self.handle_events(events)
 
-        console.height = 20
-        console.width = 4
-        console.getheightwidth = MagicMock(lambda _: (20, 4))
+        console.getheightwidth = MagicMock(side_effect=lambda: (20, 4))
 
         def same_reader(_):
             return reader
@@ -264,8 +275,7 @@ class WindowsConsoleTests(TestCase):
         events = itertools.chain(code_to_events(code))
         reader, console = self.handle_events_short(events)
 
-        console.height = 2
-        console.getheightwidth = MagicMock(lambda _: (2, 80))
+        console.getheightwidth = MagicMock(side_effect=lambda: (2, 80))
 
         def same_reader(_):
             return reader
@@ -302,8 +312,7 @@ class WindowsConsoleTests(TestCase):
         events = itertools.chain(code_to_events(code))
         reader, console = self.handle_events_height_3(events)
 
-        console.height = 1
-        console.getheightwidth = MagicMock(lambda _: (1, 80))
+        console.getheightwidth = MagicMock(side_effect=lambda: (1, 80))
 
         def same_reader(_):
             return reader
@@ -357,6 +366,28 @@ class WindowsConsoleTests(TestCase):
         reader, con = self.handle_events_narrow(events)
         self.assertEqual(reader.cxy, (2, 3))
         con.restore()
+
+    def test_reset_on_finish(self):
+        # gh-152068: finish() must emit the ANSI reset sequence so any
+        # active color does not leak past the prompt.
+        code = "1"
+        events = code_to_events(code)
+        _, con = self.handle_events(events)
+        con.finish()
+        con.out.write.assert_any_call(ANSIColors.RESET.encode(con.encoding))
+        con.restore()
+
+    def test_reset_on_restore(self):
+        # gh-152068: restore() must emit the ANSI reset sequence when VT
+        # support is enabled.
+        code = "1"
+        events = code_to_events(code)
+        _, con = self.handle_events(events)
+        con._WindowsConsole__vt_support = True
+        con._WindowsConsole__original_input_mode = 0
+        with patch.object(wc, "SetConsoleMode", return_value=1):
+            con.restore()
+        con.out.write.assert_any_call(ANSIColors.RESET.encode(con.encoding))
 
 
 class WindowsConsoleGetEventTests(TestCase):
@@ -575,6 +606,32 @@ class WindowsConsoleGetEventTests(TestCase):
         self.assertEqual(self.get_event(irs, vt_support=True),
                          Event(evt='key', data='up', raw=bytearray(b'\x1b[A')))
         self.assertEqual(self.mock.call_count, 3)
+
+    # All tests above assume that there is always keyboard data to read,
+    # because for simplicity we just use
+    # self.console.wait = MagicMock(return_value=True)
+    def test_wait_empty(self):
+        console = WindowsConsole(encoding='utf-8')
+        console.wait_for_event = MagicMock(return_value=True)
+        self.assertTrue(console.event_queue.empty())
+        timeout = 2.0
+        self.assertTrue(console.wait(timeout))
+        self.assertEqual(console.wait_for_event.call_count, 1)
+        self.assertEqual(console.wait_for_event.mock_calls[0], call(timeout))
+
+        timeout = 1.1
+        console.wait_for_event = MagicMock(return_value=False)
+        self.assertFalse(console.wait(timeout))
+        self.assertEqual(console.wait_for_event.call_count, 1)
+        self.assertEqual(console.wait_for_event.mock_calls[0], call(timeout))
+
+    def test_wait_not_empty(self):
+        console = WindowsConsole(encoding='utf-8')
+        console.wait_for_event = MagicMock(return_value=True)
+        console.event_queue.push(b"a")
+        self.assertFalse(console.event_queue.empty())
+        self.assertTrue(console.wait(0.0))
+        self.assertEqual(console.wait_for_event.call_count, 0)
 
 
 if __name__ == "__main__":

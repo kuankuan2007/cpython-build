@@ -117,6 +117,8 @@ PyAPI_FUNC(Py_ssize_t) Py_REFCNT(PyObject *ob);
     }
     #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 < 0x030b0000
     #  define Py_REFCNT(ob) _Py_REFCNT(_PyObject_CAST(ob))
+    #else
+    #  define Py_REFCNT(ob) _Py_REFCNT(ob)
     #endif
 #endif
 
@@ -476,7 +478,7 @@ static inline Py_ALWAYS_INLINE void Py_DECREF(PyObject *op)
     do { \
         _Py_TYPEOF(op)* _tmp_op_ptr = &(op); \
         _Py_TYPEOF(op) _tmp_old_op = (*_tmp_op_ptr); \
-        if (_tmp_old_op != NULL) { \
+        if (_tmp_old_op != _Py_NULL) { \
             *_tmp_op_ptr = _Py_NULL; \
             Py_DECREF(_tmp_old_op); \
         } \
@@ -486,7 +488,7 @@ static inline Py_ALWAYS_INLINE void Py_DECREF(PyObject *op)
     do { \
         PyObject **_tmp_op_ptr = _Py_CAST(PyObject**, &(op)); \
         PyObject *_tmp_old_op = (*_tmp_op_ptr); \
-        if (_tmp_old_op != NULL) { \
+        if (_tmp_old_op != _Py_NULL) { \
             PyObject *_null_ptr = _Py_NULL; \
             memcpy(_tmp_op_ptr, &_null_ptr, sizeof(PyObject*)); \
             Py_DECREF(_tmp_old_op); \

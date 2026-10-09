@@ -3232,6 +3232,37 @@ def test_pdb_issue_gh_127321():
     """
 
 
+def test_pdb_issue_gh_136057():
+    """See GH-136057
+    "step" and "next" commands should be able to get over list comprehensions
+    >>> def test_function():
+    ...     import pdb; pdb.Pdb(nosigint=True, readrc=False).set_trace()
+    ...     lst = [i for i in range(10)]
+    ...     for i in lst: pass
+
+    >>> with PdbTestInput([  # doctest: +NORMALIZE_WHITESPACE
+    ...     'next',
+    ...     'next',
+    ...     'step',
+    ...     'continue',
+    ... ]):
+    ...     test_function()
+    > <doctest test.test_pdb.test_pdb_issue_gh_136057[0]>(2)test_function()
+    -> import pdb; pdb.Pdb(nosigint=True, readrc=False).set_trace()
+    (Pdb) next
+    > <doctest test.test_pdb.test_pdb_issue_gh_136057[0]>(3)test_function()
+    -> lst = [i for i in range(10)]
+    (Pdb) next
+    > <doctest test.test_pdb.test_pdb_issue_gh_136057[0]>(4)test_function()
+    -> for i in lst: pass
+    (Pdb) step
+    --Return--
+    > <doctest test.test_pdb.test_pdb_issue_gh_136057[0]>(4)test_function()->None
+    -> for i in lst: pass
+    (Pdb) continue
+    """
+
+
 def test_pdb_issue_gh_80731():
     """See GH-80731
 
@@ -3530,6 +3561,35 @@ class PdbTestCase(unittest.TestCase):
         self.assertEqual(
             expected, pdb.find_function(func_name, os_helper.TESTFN))
 
+    def _fd_dir_for_pipe_targets(self):
+        """Return a directory exposing live file descriptors, if any."""
+        return self._proc_fd_dir() or self._dev_fd_dir()
+
+    def _proc_fd_dir(self):
+        """Return /proc-backed fd dir when it can be used for pipes."""
+        # GH-142836: Opening /proc/self/fd entries for pipes raises EACCES on
+        # Solaris, so prefer other mechanisms there.
+        if sys.platform.startswith("sunos"):
+            return None
+
+        proc_fd = "/proc/self/fd"
+        if os.path.isdir(proc_fd) and os.path.exists(os.path.join(proc_fd, '0')):
+            return proc_fd
+        return None
+
+    def _dev_fd_dir(self):
+        """Return /dev-backed fd dir when usable."""
+        dev_fd = "/dev/fd"
+        if os.path.isdir(dev_fd) and os.path.exists(os.path.join(dev_fd, '0')):
+            if sys.platform.startswith("freebsd"):
+                try:
+                    if os.stat("/dev").st_dev == os.stat(dev_fd).st_dev:
+                        return None
+                except FileNotFoundError:
+                    return None
+            return dev_fd
+        return None
+
     def test_find_function_empty_file(self):
         self._assert_find_function(b'', 'foo', None)
 
@@ -3548,6 +3608,23 @@ def quux():
             'bœr',
             ('bœr', 5),
         )
+
+    def test_find_function_too_complex(self):
+        # gh-69919: compile() can raise more than SyntaxError.
+        self._assert_find_function(
+            b"def foo():\n    return " + b"-" * 100_000 + b"1\n"
+            b"def bar():\n    pass\n",
+            'bar',
+            ('bar', 4),
+        )
+
+    def test_compile_error_message(self):
+        p = pdb.Pdb()
+        self.assertEqual(p._compile_error_message('1 + 1'), '')
+        self.assertIn('SyntaxError', p._compile_error_message('1 +'))
+        # gh-69919: compile() can raise more than SyntaxError.
+        self.assertRegex(p._compile_error_message('-' * 100_000 + '1'),
+                         r'^(MemoryError|RecursionError|SyntaxError):')
 
     def test_find_function_found_with_encoding_cookie(self):
         self._assert_find_function(
@@ -3587,6 +3664,47 @@ def bœr():
 
         stdout, _ = self.run_pdb_script(script, commands)
         self.assertIn('None', stdout)
+
+    def test_script_target_anonymous_pipe(self):
+        """
+        _ScriptTarget doesn't fail on an anonymous pipe.
+
+        GH-142315
+        """
+        fd_dir = self._fd_dir_for_pipe_targets()
+        if fd_dir is None:
+            self.skipTest('anonymous pipe targets require /proc/self/fd or /dev/fd')
+
+        read_fd, write_fd = os.pipe()
+
+        def safe_close(fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        self.addCleanup(safe_close, read_fd)
+        self.addCleanup(safe_close, write_fd)
+
+        pipe_path = os.path.join(fd_dir, str(read_fd))
+        if not os.path.exists(pipe_path):
+            self.skipTest('fd directory does not expose anonymous pipes')
+
+        script_source = 'marker = "via_pipe"\n'
+        os.write(write_fd, script_source.encode('utf-8'))
+        os.close(write_fd)
+
+        original_path0 = sys.path[0]
+        self.addCleanup(sys.path.__setitem__, 0, original_path0)
+
+        target = pdb._ScriptTarget(pipe_path)
+        code_text = target.code
+        namespace = target.namespace
+        exec(code_text, namespace)
+
+        self.assertEqual(namespace['marker'], 'via_pipe')
+        self.assertEqual(namespace['__file__'], target.filename)
+        self.assertIsNone(namespace['__spec__'])
 
     def test_find_function_first_executable_line(self):
         code = textwrap.dedent("""\
@@ -3974,7 +4092,10 @@ def bœr():
         commands = """
             continue
         """
-        self._run_pdb(["calendar", "-m"], commands, expected_returncode=2)
+        self._run_pdb(["calendar", "-m"], commands, expected_returncode=1)
+
+        _, stderr = self._run_pdb(["-m", "calendar", "-p", "1"], commands)
+        self.assertIn("unrecognized arguments: -p", stderr)
 
         stdout, _ = self._run_pdb(["-m", "calendar", "1"], commands)
         self.assertIn("December", stdout)
@@ -4539,6 +4660,43 @@ def bœr():
             ]))
             self.assertIn('break in bar', stdout)
 
+    def test_end_of_options_separator(self):
+        # gh-148615: Test parsing when '--' separator is used
+        script = "import sys; print(f'ARGS: {sys.argv[1:]}')"
+        with open(os_helper.TESTFN, 'w', encoding='utf-8') as f:
+            f.write(script)
+        stdout, _ = self._run_pdb(['--', os_helper.TESTFN, '-foo'], 'c\nq')
+        self.assertIn("ARGS: ['-foo']", stdout)
+        stdout, _ = self._run_pdb(['-c', 'continue', '--', os_helper.TESTFN, '-c', 'foo'], 'q')
+        self.assertIn("ARGS: ['-c', 'foo']", stdout)
+        stdout, stderr = self._run_pdb(['--'], 'q', expected_returncode=2)
+        self.assertIn("missing script or module to run", stderr)
+        stdout, stderr = self._run_pdb(['-x', '--', os_helper.TESTFN], 'q', expected_returncode=2)
+        self.assertIn("unrecognized arguments: -x", stderr)
+        stdout, _ = self._run_pdb([os_helper.TESTFN, '--', 'arg'], 'c\nq')
+        self.assertIn("ARGS: ['--', 'arg']", stdout)
+        with os_helper.temp_cwd():
+            with open('mymod.py', 'w', encoding='utf-8') as f:
+                f.write(script)
+            stdout, _ = self._run_pdb(['-m', 'mymod', '--', 'arg'], 'c\nq')
+            self.assertIn("ARGS: ['--', 'arg']", stdout)
+
+    def test_issue_59000(self):
+        script = """
+            def foo():
+                pass
+
+            class C:
+                def foo(self):
+                    pass
+        """
+        commands = """
+            break C.foo
+            quit
+        """
+        stdout, stderr = self.run_pdb_script(script, commands)
+        self.assertIn("The specified object 'C.foo' is not a function", stdout)
+
 
 class ChecklineTests(unittest.TestCase):
     def setUp(self):
@@ -4687,6 +4845,28 @@ class PdbTestInline(unittest.TestCase):
         """
         stdout, _ = self._run_script(script, commands)
         self.assertIn("42", stdout)
+
+    def test_readline_not_imported(self):
+        """GH-138860
+        Directly or indirectly importing readline might deadlock a subprocess
+        if it's launched with process_group=0 or preexec_fn=setpgrp
+
+        It's also a pattern that readline is never imported with just import pdb.
+
+        This test is to ensure that readline is not imported for import pdb.
+        It's possible that we have a good reason to do that in the future.
+        """
+
+        script = textwrap.dedent("""
+            import sys
+            import pdb
+            if "readline" in sys.modules:
+                print("readline imported")
+        """)
+        commands = ""
+        stdout, stderr = self._run_script(script, commands)
+        self.assertNotIn("readline imported", stdout)
+        self.assertEqual(stderr, "")
 
 
 @support.force_colorized_test_class
@@ -4850,8 +5030,9 @@ class PdbTestReadline(unittest.TestCase):
 
         self.assertIn(b'I love Python', output)
 
-    @unittest.skipIf(sys.platform.startswith('freebsd'),
-                     '\\x08 is not interpreted as backspace on FreeBSD')
+    @unittest.skipIf(sys.platform.startswith(('freebsd', 'dragonfly', 'sunos')),
+                     '\\x08 does not remove the auto-indentation with '
+                     'GNU readline on this platform')
     def test_multiline_auto_indent(self):
         script = textwrap.dedent("""
             import pdb; pdb.Pdb().set_trace()
@@ -4890,8 +5071,9 @@ class PdbTestReadline(unittest.TestCase):
 
         self.assertIn(b'42', output)
 
-    @unittest.skipIf(sys.platform.startswith('freebsd'),
-                     '\\x08 is not interpreted as backspace on FreeBSD')
+    @unittest.skipIf(sys.platform.startswith(('freebsd', 'dragonfly', 'sunos')),
+                     '\\x08 does not remove the auto-indentation with '
+                     'GNU readline on this platform')
     def test_multiline_indent_completion(self):
         script = textwrap.dedent("""
             import pdb; pdb.Pdb().set_trace()

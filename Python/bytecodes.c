@@ -181,7 +181,15 @@ dummy_func(
         }
 
         tier1 op(_MAYBE_INSTRUMENT, (--)) {
-            if (tstate->tracing == 0) {
+            #ifdef Py_GIL_DISABLED
+            // For thread-safety, we need to check instrumentation version
+            // even when tracing. Otherwise, another thread may concurrently
+            // re-write the bytecode while we are executing this function.
+            int check_instrumentation = 1;
+            #else
+            int check_instrumentation = (tstate->tracing == 0);
+            #endif
+            if (check_instrumentation) {
                 uintptr_t global_version = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & ~_PY_EVAL_EVENTS_MASK;
                 uintptr_t code_version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(_PyFrame_GetCode(frame)->_co_instrumentation_version);
                 if (code_version != global_version) {
@@ -785,9 +793,12 @@ dummy_func(
             PyObject *temp = PyStackRef_AsPyObjectSteal(*target_local);
             PyObject *right_o = PyStackRef_AsPyObjectSteal(right);
             PyUnicode_Append(&temp, right_o);
-            *target_local = PyStackRef_FromPyObjectSteal(temp);
             Py_DECREF(right_o);
-            ERROR_IF(PyStackRef_IsNull(*target_local));
+            if (temp == NULL) {
+                *target_local = PyStackRef_NULL;
+                ERROR_IF(true);
+            }
+            *target_local = PyStackRef_FromPyObjectSteal(temp);
         #if TIER_ONE
             // The STORE_FAST is already done. This is done here in tier one,
             // and during trace projection in tier two:
@@ -816,6 +827,7 @@ dummy_func(
 
             PyObject *res_o = d->action(left_o, right_o);
             DECREF_INPUTS();
+            ERROR_IF(res_o == NULL);
             res = PyStackRef_FromPyObjectSteal(res_o);
         }
 
@@ -1044,7 +1056,15 @@ dummy_func(
         }
 
         inst(SET_ADD, (set, unused[oparg-1], v -- set, unused[oparg-1])) {
-            int err = _PySet_AddTakeRef((PySetObject *)PyStackRef_AsPyObjectBorrow(set),
+            PyObject *set_o = PyStackRef_AsPyObjectBorrow(set);
+            // gh-154902: user code can rebind __conditional_annotations__
+            if (!PySet_CheckExact(set_o)) {
+                _PyErr_Format(tstate, PyExc_TypeError,
+                              "'%T' object is not a set", set_o);
+                PyStackRef_CLOSE(v);
+                ERROR_IF(true);
+            }
+            int err = _PySet_AddTakeRef((PySetObject *)set_o,
                                         PyStackRef_AsPyObjectSteal(v));
             ERROR_IF(err);
         }
@@ -1376,13 +1396,12 @@ dummy_func(
             gen_frame->previous = NULL;
             /* We don't know which of these is relevant here, so keep them equal */
             assert(INLINE_CACHE_ENTRIES_SEND == INLINE_CACHE_ENTRIES_FOR_ITER);
-            #if TIER_ONE
-            assert(frame->instr_ptr->op.code == INSTRUMENTED_LINE ||
-                   frame->instr_ptr->op.code == INSTRUMENTED_INSTRUCTION ||
-                   _PyOpcode_Deopt[frame->instr_ptr->op.code] == SEND ||
-                   _PyOpcode_Deopt[frame->instr_ptr->op.code] == FOR_ITER ||
-                   _PyOpcode_Deopt[frame->instr_ptr->op.code] == INTERPRETER_EXIT ||
-                   _PyOpcode_Deopt[frame->instr_ptr->op.code] == ENTER_EXECUTOR);
+            #if TIER_ONE && defined(Py_DEBUG)
+            if (!PyStackRef_IsNone(frame->f_executable)) {
+                int i = frame->instr_ptr - _PyFrame_GetBytecode(frame);
+                int opcode = _Py_GetBaseCodeUnit(_PyFrame_GetCode(frame), i).op.code;
+                assert(opcode == SEND || opcode == FOR_ITER);
+            }
             #endif
             RELOAD_STACK();
             LOAD_IP(1 + INLINE_CACHE_ENTRIES_SEND);
@@ -2283,39 +2302,19 @@ dummy_func(
 
         op(_LOAD_ATTR, (owner -- attr, self_or_null[oparg&1])) {
             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
-            PyObject *attr_o;
             if (oparg & 1) {
                 /* Designed to work in tandem with CALL, pushes two values. */
-                attr_o = NULL;
-                int is_meth = _PyObject_GetMethod(PyStackRef_AsPyObjectBorrow(owner), name, &attr_o);
-                if (is_meth) {
-                    /* We can bypass temporary bound method object.
-                       meth is unbound method and obj is self.
-                       meth | self | arg1 | ... | argN
-                     */
-                    assert(attr_o != NULL);  // No errors on this branch
-                    self_or_null[0] = owner;  // Transfer ownership
-                    DEAD(owner);
-                }
-                else {
-                    /* meth is not an unbound method (but a regular attr, or
-                       something was returned by a descriptor protocol).  Set
-                       the second element of the stack to NULL, to signal
-                       CALL that it's not a method call.
-                       meth | NULL | arg1 | ... | argN
-                    */
-                    PyStackRef_CLOSE(owner);
-                    ERROR_IF(attr_o == NULL);
-                    self_or_null[0] = PyStackRef_NULL;
-                }
+                attr = _Py_LoadAttr_StackRefSteal(tstate, owner, name, self_or_null);
+                DEAD(owner);
+                ERROR_IF(PyStackRef_IsNull(attr));
             }
             else {
                 /* Classic, pushes one value. */
-                attr_o = PyObject_GetAttr(PyStackRef_AsPyObjectBorrow(owner), name);
+                PyObject *attr_o = PyObject_GetAttr(PyStackRef_AsPyObjectBorrow(owner), name);
                 PyStackRef_CLOSE(owner);
                 ERROR_IF(attr_o == NULL);
+                attr = PyStackRef_FromPyObjectSteal(attr_o);
             }
-            attr = PyStackRef_FromPyObjectSteal(attr_o);
         }
 
         macro(LOAD_ATTR) =
@@ -4740,6 +4739,7 @@ dummy_func(
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
             _CHECK_FUNCTION_VERSION_KW +
+            _CHECK_RECURSION_REMAINING +
             _PY_FRAME_KW +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
@@ -4977,6 +4977,13 @@ dummy_func(
             PyObject **ptr = (PyObject **)(((char *)func) + offset);
             assert(*ptr == NULL);
             *ptr = attr;
+            if (oparg == MAKE_FUNCTION_ANNOTATE && PyFunction_Check(attr)) {
+                // gh-137814: Fix the qualname of __annotate__ functions
+                PyFunctionObject *func_obj = (PyFunctionObject *)attr;
+                PyObject *fixed_qualname = PyUnicode_FromFormat("%U.__annotate__", ((PyFunctionObject *)func)->func_qualname);
+                ERROR_IF(fixed_qualname == NULL);
+                Py_SETREF(func_obj->func_qualname, fixed_qualname);
+            }
         }
 
         inst(RETURN_GENERATOR, (-- res)) {

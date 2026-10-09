@@ -2,51 +2,12 @@
 #include <errcode.h>
 
 #include "pycore_pyerrors.h"      // _PyErr_ProgramDecodedTextObject()
+#include "pycore_runtime.h"       // _Py_ID()
 #include "lexer/state.h"
 #include "lexer/lexer.h"
 #include "pegen.h"
 
 // TOKENIZER ERRORS
-
-void
-_PyPegen_raise_tokenizer_init_error(PyObject *filename)
-{
-    if (!(PyErr_ExceptionMatches(PyExc_LookupError)
-          || PyErr_ExceptionMatches(PyExc_SyntaxError)
-          || PyErr_ExceptionMatches(PyExc_ValueError)
-          || PyErr_ExceptionMatches(PyExc_UnicodeDecodeError))) {
-        return;
-    }
-    PyObject *errstr = NULL;
-    PyObject *tuple = NULL;
-    PyObject *type;
-    PyObject *value;
-    PyObject *tback;
-    PyErr_Fetch(&type, &value, &tback);
-    errstr = PyObject_Str(value);
-    if (!errstr) {
-        goto error;
-    }
-
-    PyObject *tmp = Py_BuildValue("(OiiO)", filename, 0, -1, Py_None);
-    if (!tmp) {
-        goto error;
-    }
-
-    tuple = PyTuple_Pack(2, errstr, tmp);
-    Py_DECREF(tmp);
-    if (!value) {
-        goto error;
-    }
-    PyErr_SetObject(PyExc_SyntaxError, tuple);
-
-error:
-    Py_XDECREF(type);
-    Py_XDECREF(value);
-    Py_XDECREF(tback);
-    Py_XDECREF(errstr);
-    Py_XDECREF(tuple);
-}
 
 static inline void
 raise_unclosed_parentheses_error(Parser *p) {

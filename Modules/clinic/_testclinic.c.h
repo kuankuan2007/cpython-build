@@ -273,19 +273,19 @@ char_converter(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 {
     PyObject *return_value = NULL;
     char a = 'A';
-    char b = '\x07';
-    char c = '\x08';
+    char b = '\a';
+    char c = '\b';
     char d = '\t';
     char e = '\n';
-    char f = '\x0b';
-    char g = '\x0c';
+    char f = '\v';
+    char g = '\f';
     char h = '\r';
     char i = '"';
     char j = '\'';
     char k = '?';
     char l = '\\';
-    char m = '\x00';
-    char n = '\xff';
+    char m = '\0';
+    char n = '\377';
 
     if (!_PyArg_CheckPositional("char_converter", nargs, 0, 14)) {
         goto exit;
@@ -860,7 +860,7 @@ exit:
 }
 
 PyDoc_STRVAR(int_converter__doc__,
-"int_converter($module, a=12, b=34, c=45, /)\n"
+"int_converter($module, a=12, b=34, c=\'-\', /)\n"
 "--\n"
 "\n");
 
@@ -876,7 +876,7 @@ int_converter(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
     PyObject *return_value = NULL;
     int a = 12;
     int b = 34;
-    int c = 45;
+    int c = '-';
 
     if (!_PyArg_CheckPositional("int_converter", nargs, 0, 3)) {
         goto exit;
@@ -3358,6 +3358,96 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(group_and_opt__doc__,
+"group_and_opt([a, b,] c=None)");
+
+#define GROUP_AND_OPT_METHODDEF    \
+    {"group_and_opt", (PyCFunction)group_and_opt, METH_VARARGS, group_and_opt__doc__},
+
+static PyObject *
+group_and_opt_impl(PyObject *module, int group_left_1, PyObject *a,
+                   PyObject *b, PyObject *c);
+
+static PyObject *
+group_and_opt(PyObject *module, PyObject *args)
+{
+    PyObject *return_value = NULL;
+    int group_left_1 = 0;
+    PyObject *a = NULL;
+    PyObject *b = NULL;
+    PyObject *c = Py_None;
+
+    switch (PyTuple_GET_SIZE(args)) {
+        case 0:
+        case 1:
+            if (!PyArg_ParseTuple(args, "|O:group_and_opt", &c)) {
+                goto exit;
+            }
+            break;
+        case 2:
+        case 3:
+            if (!PyArg_ParseTuple(args, "OO|O:group_and_opt", &a, &b, &c)) {
+                goto exit;
+            }
+            group_left_1 = 1;
+            break;
+        default:
+            PyErr_SetString(PyExc_TypeError, "group_and_opt requires 0 to 3 arguments");
+            goto exit;
+    }
+    return_value = group_and_opt_impl(module, group_left_1, a, b, c);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(group_and_two_opt__doc__,
+"group_and_two_opt([a, b, c,] d=None, e=None)");
+
+#define GROUP_AND_TWO_OPT_METHODDEF    \
+    {"group_and_two_opt", (PyCFunction)group_and_two_opt, METH_VARARGS, group_and_two_opt__doc__},
+
+static PyObject *
+group_and_two_opt_impl(PyObject *module, int group_left_1, PyObject *a,
+                       PyObject *b, PyObject *c, PyObject *d, PyObject *e);
+
+static PyObject *
+group_and_two_opt(PyObject *module, PyObject *args)
+{
+    PyObject *return_value = NULL;
+    int group_left_1 = 0;
+    PyObject *a = NULL;
+    PyObject *b = NULL;
+    PyObject *c = NULL;
+    PyObject *d = Py_None;
+    PyObject *e = Py_None;
+
+    switch (PyTuple_GET_SIZE(args)) {
+        case 0:
+        case 1:
+        case 2:
+            if (!PyArg_ParseTuple(args, "|OO:group_and_two_opt", &d, &e)) {
+                goto exit;
+            }
+            break;
+        case 3:
+        case 4:
+        case 5:
+            if (!PyArg_ParseTuple(args, "OOO|OO:group_and_two_opt", &a, &b, &c, &d, &e)) {
+                goto exit;
+            }
+            group_left_1 = 1;
+            break;
+        default:
+            PyErr_SetString(PyExc_TypeError, "group_and_two_opt requires 0 to 5 arguments");
+            goto exit;
+    }
+    return_value = group_and_two_opt_impl(module, group_left_1, a, b, c, d, e);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(gh_32092_oob__doc__,
 "gh_32092_oob($module, /, pos1, pos2, *varargs, kw1=None, kw2=None)\n"
 "--\n"
@@ -4481,4 +4571,4 @@ _testclinic_TestClass_posonly_poskw_varpos_array_no_fastcall(PyObject *type, PyO
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=84ffc31f27215baa input=a9049054013a1b77]*/
+/*[clinic end generated code: output=c92c0125c28434c0 input=a9049054013a1b77]*/

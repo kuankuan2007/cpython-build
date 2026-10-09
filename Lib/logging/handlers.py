@@ -196,7 +196,11 @@ class RotatingFileHandler(BaseRotatingHandler):
         if self.stream is None:                 # delay was set...
             self.stream = self._open()
         if self.maxBytes > 0:                   # are we rolling over?
-            pos = self.stream.tell()
+            try:
+                pos = self.stream.tell()
+            except io.UnsupportedOperation:
+                # gh-143237: Never rollover a named pipe.
+                return False
             if not pos:
                 # gh-116263: Never rollover an empty file
                 return False
@@ -536,8 +540,13 @@ class WatchedFileHandler(logging.FileHandler):
         If underlying file has changed, reopen the file before emitting the
         record to it.
         """
-        self.reopenIfNeeded()
-        logging.FileHandler.emit(self, record)
+        # Report an error while reopening the file, like emit errors.
+        try:
+            self.reopenIfNeeded()
+        except Exception:
+            self.handleError(record)
+        else:
+            logging.FileHandler.emit(self, record)
 
 
 class SocketHandler(logging.Handler):

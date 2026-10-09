@@ -24,7 +24,7 @@ class int "PyObject *" "&PyLong_Type"
 
 #define medium_value(x) ((stwodigits)_PyLong_CompactValue(x))
 
-#define IS_SMALL_INT(ival) (-_PY_NSMALLNEGINTS <= (ival) && (ival) < _PY_NSMALLPOSINTS)
+#define IS_SMALL_INT(ival) _PY_IS_SMALL_INT(ival)
 #define IS_SMALL_UINT(ival) ((ival) < _PY_NSMALLPOSINTS)
 
 #define _MAX_STR_DIGITS_ERROR_FMT_TO_INT "Exceeds the limit (%d digits) for integer string conversion: value has %zd digits; use sys.set_int_max_str_digits() to increase the limit"
@@ -324,7 +324,7 @@ _PyLong_Negate(PyLongObject **x_p)
     PyLongObject *x;
 
     x = (PyLongObject *)*x_p;
-    if (Py_REFCNT(x) == 1) {
+    if (_PyObject_IsUniquelyReferenced((PyObject *)x)) {
          _PyLong_FlipSign(x);
         return;
     }
@@ -1138,13 +1138,19 @@ _PyLong_AsByteArray(PyLongObject* v,
         *p = (unsigned char)(accum & 0xff);
         p += pincr;
     }
-    else if (j == n && n > 0 && is_signed) {
+    else if (j == n && is_signed) {
         /* The main loop filled the byte array exactly, so the code
            just above didn't get to ensure there's a sign bit, and the
            loop below wouldn't add one either.  Make sure a sign bit
            exists. */
-        unsigned char msb = *(p - pincr);
-        int sign_bit_set = msb >= 0x80;
+        int sign_bit_set;
+        if (n > 0) {
+            unsigned char msb = *(p - pincr);
+            sign_bit_set = msb >= 0x80;
+        }
+        else {
+            sign_bit_set = 0;
+        }
         assert(accumbits == 0);
         if (sign_bit_set == do_twos_comp)
             return 0;
@@ -2043,7 +2049,7 @@ long_to_decimal_string_internal(PyObject *aa,
     if (size_a >= 10 * _PY_LONG_MAX_STR_DIGITS_THRESHOLD
                   / (3 * PyLong_SHIFT) + 2) {
         PyInterpreterState *interp = _PyInterpreterState_GET();
-        int max_str_digits = interp->long_state.max_str_digits;
+        int max_str_digits = _Py_atomic_load_int(&interp->long_state.max_str_digits);
         if ((max_str_digits > 0) &&
             (max_str_digits / (3 * PyLong_SHIFT) <= (size_a - 11) / 10)) {
             PyErr_Format(PyExc_ValueError, _MAX_STR_DIGITS_ERROR_FMT_TO_STR,
@@ -2124,7 +2130,7 @@ long_to_decimal_string_internal(PyObject *aa,
     }
     if (strlen > _PY_LONG_MAX_STR_DIGITS_THRESHOLD) {
         PyInterpreterState *interp = _PyInterpreterState_GET();
-        int max_str_digits = interp->long_state.max_str_digits;
+        int max_str_digits = _Py_atomic_load_int(&interp->long_state.max_str_digits);
         Py_ssize_t strlen_nosign = strlen - negative;
         if ((max_str_digits > 0) && (strlen_nosign > max_str_digits)) {
             Py_DECREF(scratch);
@@ -2936,7 +2942,7 @@ long_from_string_base(const char **str, int base, PyLongObject **res)
          * quadratic algorithm. */
         if (digits > _PY_LONG_MAX_STR_DIGITS_THRESHOLD) {
             PyInterpreterState *interp = _PyInterpreterState_GET();
-            int max_str_digits = interp->long_state.max_str_digits;
+            int max_str_digits = _Py_atomic_load_int(&interp->long_state.max_str_digits);
             if ((max_str_digits > 0) && (digits > max_str_digits)) {
                 PyErr_Format(PyExc_ValueError, _MAX_STR_DIGITS_ERROR_FMT_TO_INT,
                              max_str_digits, digits);
@@ -3041,11 +3047,11 @@ PyLong_FromString(const char *str, char **pend, int base)
     }
 
     /* Set sign and normalize */
-    if (sign < 0) {
-        _PyLong_FlipSign(z);
-    }
     long_normalize(z);
     z = maybe_small_long(z);
+    if (sign < 0) {
+        _PyLong_Negate(&z);
+    }
 
     if (pend != NULL) {
         *pend = (char *)str;
@@ -3545,21 +3551,11 @@ long_richcompare(PyObject *self, PyObject *other, int op)
     Py_RETURN_RICHCOMPARE(result, 0, op);
 }
 
-static inline int
-/// Return 1 if the object is one of the immortal small ints
-_long_is_small_int(PyObject *op)
-{
-    PyLongObject *long_object = (PyLongObject *)op;
-    int is_small_int = (long_object->long_value.lv_tag & IMMORTALITY_BIT_MASK) != 0;
-    assert((!is_small_int) || PyLong_CheckExact(op));
-    return is_small_int;
-}
-
 void
 _PyLong_ExactDealloc(PyObject *self)
 {
     assert(PyLong_CheckExact(self));
-    if (_long_is_small_int(self)) {
+    if (_PyLong_IsSmallInt((PyLongObject *)self)) {
         // See PEP 683, section Accidental De-Immortalizing for details
         _Py_SetImmortal(self);
         return;
@@ -3574,7 +3570,7 @@ _PyLong_ExactDealloc(PyObject *self)
 static void
 long_dealloc(PyObject *self)
 {
-    if (_long_is_small_int(self)) {
+    if (_PyLong_IsSmallInt((PyLongObject *)self)) {
         /* This should never get called, but we also don't want to SEGV if
          * we accidentally decref small Ints out of existence. Instead,
          * since small Ints are immortal, re-set the reference count.
@@ -4333,10 +4329,10 @@ pylong_int_divmod(PyLongObject *v, PyLongObject *w,
     if (result == NULL) {
         return -1;
     }
-    if (!PyTuple_Check(result)) {
+    if (!PyTuple_Check(result) || PyTuple_GET_SIZE(result) != 2) {
         Py_DECREF(result);
         PyErr_SetString(PyExc_ValueError,
-                        "tuple is required from int_divmod()");
+                        "tuple of length 2 is required from int_divmod()");
         return -1;
     }
     PyObject *q = PyTuple_GET_ITEM(result, 0);
@@ -5748,7 +5744,7 @@ _PyLong_GCD(PyObject *aarg, PyObject *barg)
             assert(size_a >= 0);
             _PyLong_SetSignAndDigitCount(c, 1, size_a);
         }
-        else if (Py_REFCNT(a) == 1) {
+        else if (_PyObject_IsUniquelyReferenced((PyObject *)a)) {
             c = (PyLongObject*)Py_NewRef(a);
         }
         else {
@@ -5762,7 +5758,8 @@ _PyLong_GCD(PyObject *aarg, PyObject *barg)
             assert(size_a >= 0);
             _PyLong_SetSignAndDigitCount(d, 1, size_a);
         }
-        else if (Py_REFCNT(b) == 1 && size_a <= alloc_b) {
+        else if (_PyObject_IsUniquelyReferenced((PyObject *)b)
+                 && size_a <= alloc_b) {
             d = (PyLongObject*)Py_NewRef(b);
             assert(size_a >= 0);
             _PyLong_SetSignAndDigitCount(d, 1, size_a);
@@ -6280,20 +6277,21 @@ int_as_integer_ratio_impl(PyObject *self)
 int.to_bytes
 
     length: Py_ssize_t = 1
-        Length of bytes object to use.  An OverflowError is raised if the
-        integer is not representable with the given number of bytes.  Default
-        is length 1.
+        Length of bytes object to use.  An OverflowError is raised if
+        the integer is not representable with the given number of bytes.
+        Default is length 1.
     byteorder: unicode(c_default="NULL") = "big"
-        The byte order used to represent the integer.  If byteorder is 'big',
-        the most significant byte is at the beginning of the byte array.  If
-        byteorder is 'little', the most significant byte is at the end of the
-        byte array.  To request the native byte order of the host system, use
-        sys.byteorder as the byte order value.  Default is to use 'big'.
+        The byte order used to represent the integer.  If byteorder is
+        'big', the most significant byte is at the beginning of the byte
+        array.  If byteorder is 'little', the most significant byte is at
+        the end of the byte array.  To request the native byte order of
+        the host system, use sys.byteorder as the byte order value.
+        Default is to use 'big'.
     *
     signed as is_signed: bool = False
-        Determines whether two's complement is used to represent the integer.
-        If signed is False and a negative integer is given, an OverflowError
-        is raised.
+        Determines whether two's complement is used to represent the
+        integer.  If signed is False and a negative integer is given,
+        an OverflowError is raised.
 
 Return an array of bytes representing an integer.
 [clinic start generated code]*/
@@ -6301,7 +6299,7 @@ Return an array of bytes representing an integer.
 static PyObject *
 int_to_bytes_impl(PyObject *self, Py_ssize_t length, PyObject *byteorder,
                   int is_signed)
-/*[clinic end generated code: output=89c801df114050a3 input=a0103d0e9ad85c2b]*/
+/*[clinic end generated code: output=89c801df114050a3 input=661d7e615a4f132d]*/
 {
     int little_endian;
     PyObject *bytes;
@@ -6344,18 +6342,20 @@ int.from_bytes
 
     bytes as bytes_obj: object
         Holds the array of bytes to convert.  The argument must either
-        support the buffer protocol or be an iterable object producing bytes.
-        Bytes and bytearray are examples of built-in objects that support the
-        buffer protocol.
+        support the buffer protocol or be an iterable object producing
+        bytes.  Bytes and bytearray are examples of built-in objects that
+        support the buffer protocol.
     byteorder: unicode(c_default="NULL") = "big"
-        The byte order used to represent the integer.  If byteorder is 'big',
-        the most significant byte is at the beginning of the byte array.  If
-        byteorder is 'little', the most significant byte is at the end of the
-        byte array.  To request the native byte order of the host system, use
-        sys.byteorder as the byte order value.  Default is to use 'big'.
+        The byte order used to represent the integer.  If byteorder is
+        'big', the most significant byte is at the beginning of the byte
+        array.  If byteorder is 'little', the most significant byte is at
+        the end of the byte array.  To request the native byte order of
+        the host system, use sys.byteorder as the byte order value.
+        Default is to use 'big'.
     *
     signed as is_signed: bool = False
-        Indicates whether two's complement is used to represent the integer.
+        Indicates whether two's complement is used to represent the
+        integer.
 
 Return the integer represented by the given array of bytes.
 [clinic start generated code]*/
@@ -6363,7 +6363,7 @@ Return the integer represented by the given array of bytes.
 static PyObject *
 int_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
                     PyObject *byteorder, int is_signed)
-/*[clinic end generated code: output=efc5d68e31f9314f input=2ff527997fe7b0c5]*/
+/*[clinic end generated code: output=efc5d68e31f9314f input=95801e50b942e164]*/
 {
     int little_endian;
     PyObject *long_obj, *bytes;
@@ -6498,7 +6498,8 @@ If x is not a number or if base is given, then x must be a string,\n\
 bytes, or bytearray instance representing an integer literal in the\n\
 given base.  The literal can be preceded by '+' or '-' and be surrounded\n\
 by whitespace.  The base defaults to 10.  Valid bases are 0 and 2-36.\n\
-Base 0 means to interpret the base from the string as an integer literal.\n\
+Base 0 means to interpret the base from the string as an integer\n\
+iteral.\n\
 >>> int('0b100', base=0)\n\
 4");
 
@@ -6696,58 +6697,62 @@ PyObject* PyLong_FromUInt64(uint64_t value)
     PYLONG_FROM_UINT(uint64_t, value);
 }
 
-#define LONG_TO_INT(obj, value, type_name) \
+#define LONG_TO_INT(type, obj, result) \
     do { \
+        type value; \
         int flags = (Py_ASNATIVEBYTES_NATIVE_ENDIAN \
                      | Py_ASNATIVEBYTES_ALLOW_INDEX); \
-        Py_ssize_t bytes = PyLong_AsNativeBytes(obj, value, sizeof(*value), flags); \
+        Py_ssize_t bytes = PyLong_AsNativeBytes(obj, &value, sizeof(value), flags); \
         if (bytes < 0) { \
             return -1; \
         } \
-        if ((size_t)bytes > sizeof(*value)) { \
+        if ((size_t)bytes > sizeof(value)) { \
             PyErr_SetString(PyExc_OverflowError, \
-                            "Python int too large to convert to " type_name); \
+                            "Python int too large to convert to C " #type); \
             return -1; \
         } \
+        *result = value; \
         return 0; \
     } while (0)
 
-int PyLong_AsInt32(PyObject *obj, int32_t *value)
+int PyLong_AsInt32(PyObject *obj, int32_t *result)
 {
-    LONG_TO_INT(obj, value, "C int32_t");
+    LONG_TO_INT(int32_t, obj, result);
 }
 
-int PyLong_AsInt64(PyObject *obj, int64_t *value)
+int PyLong_AsInt64(PyObject *obj, int64_t *result)
 {
-    LONG_TO_INT(obj, value, "C int64_t");
+    LONG_TO_INT(int64_t, obj, result);
 }
 
-#define LONG_TO_UINT(obj, value, type_name) \
+#define LONG_TO_UINT(type, obj, result) \
     do { \
+        type value; \
         int flags = (Py_ASNATIVEBYTES_NATIVE_ENDIAN \
                      | Py_ASNATIVEBYTES_UNSIGNED_BUFFER \
                      | Py_ASNATIVEBYTES_REJECT_NEGATIVE \
                      | Py_ASNATIVEBYTES_ALLOW_INDEX); \
-        Py_ssize_t bytes = PyLong_AsNativeBytes(obj, value, sizeof(*value), flags); \
+        Py_ssize_t bytes = PyLong_AsNativeBytes(obj, &value, sizeof(value), flags); \
         if (bytes < 0) { \
             return -1; \
         } \
-        if ((size_t)bytes > sizeof(*value)) { \
+        if ((size_t)bytes > sizeof(value)) { \
             PyErr_SetString(PyExc_OverflowError, \
-                            "Python int too large to convert to " type_name); \
+                            "Python int too large to convert to C " #type); \
             return -1; \
         } \
+        *result = value; \
         return 0; \
     } while (0)
 
-int PyLong_AsUInt32(PyObject *obj, uint32_t *value)
+int PyLong_AsUInt32(PyObject *obj, uint32_t *result)
 {
-    LONG_TO_UINT(obj, value, "C uint32_t");
+    LONG_TO_UINT(uint32_t, obj, result);
 }
 
-int PyLong_AsUInt64(PyObject *obj, uint64_t *value)
+int PyLong_AsUInt64(PyObject *obj, uint64_t *result)
 {
-    LONG_TO_UINT(obj, value, "C uint64_t");
+    LONG_TO_UINT(uint64_t, obj, result);
 }
 
 

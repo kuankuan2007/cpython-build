@@ -1036,11 +1036,11 @@ static PyObject *
 frame_lasti_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=03275b4f0327d1a2 input=0225ed49cb1fbeeb]*/
 {
-    int lasti = _PyInterpreterFrame_LASTI(self->f_frame);
+    int lasti = PyUnstable_InterpreterFrame_GetLasti(self->f_frame);
     if (lasti < 0) {
         return PyLong_FromLong(-1);
     }
-    return PyLong_FromLong(lasti * sizeof(_Py_CODEUNIT));
+    return PyLong_FromLong(lasti);
 }
 
 /*[clinic input]
@@ -1109,7 +1109,7 @@ frame_back_get_impl(PyFrameObject *self)
 /*[clinic end generated code: output=3a84c22a55a63c79 input=9e528570d0e1f44a]*/
 {
     PyObject *res = (PyObject *)PyFrame_GetBack(self);
-    if (res == NULL) {
+    if (res == NULL && !PyErr_Occurred()) {
         Py_RETURN_NONE;
     }
     return res;
@@ -1641,10 +1641,6 @@ frame_lineno_set_impl(PyFrameObject *self, PyObject *value)
 /*[clinic end generated code: output=e64c86ff6be64292 input=36ed3c896b27fb91]*/
 {
     PyCodeObject *code = _PyFrame_GetCode(self->f_frame);
-    if (value == NULL) {
-        PyErr_SetString(PyExc_AttributeError, "cannot delete attribute");
-        return -1;
-    }
     /* f_lineno must be an integer. */
     if (!PyLong_CheckExact(value)) {
         PyErr_SetString(PyExc_ValueError,
@@ -1856,12 +1852,13 @@ frame_trace_get_impl(PyFrameObject *self)
 /*[clinic input]
 @critical_section
 @setter
+@deleter
 frame.f_trace as frame_trace
 [clinic start generated code]*/
 
 static int
 frame_trace_set_impl(PyFrameObject *self, PyObject *value)
-/*[clinic end generated code: output=d6fe08335cf76ae4 input=d96a18bda085707f]*/
+/*[clinic end generated code: output=d6fe08335cf76ae4 input=b652d64fdd1189f2]*/
 {
     if (value == Py_None) {
         value = NULL;
@@ -2044,11 +2041,15 @@ static PyObject *
 frame_repr(PyObject *op)
 {
     PyFrameObject *f = PyFrameObject_CAST(op);
+    PyObject *result;
+    Py_BEGIN_CRITICAL_SECTION(f);
     int lineno = PyFrame_GetLineNumber(f);
     PyCodeObject *code = _PyFrame_GetCode(f->f_frame);
-    return PyUnicode_FromFormat(
+    result = PyUnicode_FromFormat(
         "<frame at %p, file %R, line %d, code %S>",
         f, code->co_filename, lineno, code->co_name);
+    Py_END_CRITICAL_SECTION();
+    return result;
 }
 
 static PyMethodDef frame_methods[] = {
@@ -2284,6 +2285,9 @@ _PyFrame_GetLocals(_PyInterpreterFrame *frame)
     }
 
     PyFrameObject* f = _PyFrame_GetFrameObject(frame);
+    if (f == NULL) {
+        return NULL;
+    }
 
     return _PyFrameLocalsProxy_New(f);
 }
@@ -2393,6 +2397,9 @@ PyFrame_GetBack(PyFrameObject *frame)
         prev = _PyFrame_GetFirstComplete(prev);
         if (prev) {
             back = _PyFrame_GetFrameObject(prev);
+            if (back == NULL) {
+                return NULL;
+            }
         }
     }
     return (PyFrameObject*)Py_XNewRef(back);

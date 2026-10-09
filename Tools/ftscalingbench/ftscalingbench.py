@@ -27,6 +27,7 @@ import queue
 import sys
 import threading
 import time
+from dataclasses import dataclass
 
 # The iterations in individual benchmarks are scaled by this factor.
 WORK_SCALE = 100
@@ -187,6 +188,65 @@ def thread_local_read():
         _ = tmp.x
         _ = tmp.x
         _ = tmp.x
+
+
+@dataclass
+class MyDataClass:
+    x: int
+    y: int
+    z: int
+
+@register_benchmark
+def instantiate_dataclass():
+    for _ in range(1000 * WORK_SCALE):
+        obj = MyDataClass(x=1, y=2, z=3)
+
+@register_benchmark
+def super_call():
+    # TODO: super() on the same class from multiple threads still doesn't
+    # scale well, so use a class per-thread here for now.
+    class Base:
+        def method(self):
+            return 1
+
+    class Derived(Base):
+        def method(self):
+            return super().method()
+
+    obj = Derived()
+    for _ in range(1000 * WORK_SCALE):
+        obj.method()
+
+
+class MyClassMethod:
+    @classmethod
+    def my_classmethod(cls):
+        return cls
+
+    @staticmethod
+    def my_staticmethod():
+        pass
+
+@register_benchmark
+def classmethod_call():
+    obj = MyClassMethod()
+    for _ in range(1000 * WORK_SCALE):
+        obj.my_classmethod()
+
+@register_benchmark
+def staticmethod_call():
+    obj = MyClassMethod()
+    for _ in range(1000 * WORK_SCALE):
+        obj.my_staticmethod()
+
+@register_benchmark
+def setattr_non_interned():
+    prefix = "prefix"
+    obj = MyObject()
+    for _ in range(1000 * WORK_SCALE):
+        setattr(obj, f"{prefix}_a", None)
+        setattr(obj, f"{prefix}_b", None)
+        setattr(obj, f"{prefix}_c", None)
 
 
 def bench_one_thread(func):

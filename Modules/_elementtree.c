@@ -16,6 +16,7 @@
 #endif
 
 #include "Python.h"
+#include "pycore_ceval.h"         // _Py_EnterRecursiveCall()
 #include "pycore_pyhash.h"        // _Py_HashSecret
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
 
@@ -563,7 +564,7 @@ element_get_attrib(ElementObject* self)
 LOCAL(PyObject*)
 element_get_text(ElementObject* self)
 {
-    /* return borrowed reference to text attribute */
+    /* return new reference to text attribute */
 
     PyObject *res = self->text;
 
@@ -578,13 +579,13 @@ element_get_text(ElementObject* self)
         }
     }
 
-    return res;
+    return Py_NewRef(res);
 }
 
 LOCAL(PyObject*)
 element_get_tail(ElementObject* self)
 {
-    /* return borrowed reference to text attribute */
+    /* return new reference to tail attribute */
 
     PyObject *res = self->tail;
 
@@ -599,7 +600,7 @@ element_get_tail(ElementObject* self)
         }
     }
 
-    return res;
+    return Py_NewRef(res);
 }
 
 static PyObject*
@@ -802,26 +803,31 @@ _elementtree_Element___deepcopy___impl(ElementObject *self, PyObject *memo)
 /*[clinic end generated code: output=eefc3df50465b642 input=a2d40348c0aade10]*/
 {
     Py_ssize_t i;
-    ElementObject* element;
+    ElementObject* element = NULL;
     PyObject* tag;
     PyObject* attrib;
     PyObject* text;
     PyObject* tail;
     PyObject* id;
 
+    if (_Py_EnterRecursiveCall(" in Element.__deepcopy__")) {
+        return NULL;
+    }
+
     PyTypeObject *tp = Py_TYPE(self);
     elementtreestate *st = get_elementtree_state_by_type(tp);
     // The deepcopy() helper takes care of incrementing the refcount
     // of the object to copy so to avoid use-after-frees.
     tag = deepcopy(st, self->tag, memo);
-    if (!tag)
-        return NULL;
+    if (!tag) {
+        goto error;
+    }
 
     if (self->extra && self->extra->attrib) {
         attrib = deepcopy(st, self->extra->attrib, memo);
         if (!attrib) {
             Py_DECREF(tag);
-            return NULL;
+            goto error;
         }
     } else {
         attrib = NULL;
@@ -832,8 +838,9 @@ _elementtree_Element___deepcopy___impl(ElementObject *self, PyObject *memo)
     Py_DECREF(tag);
     Py_XDECREF(attrib);
 
-    if (!element)
-        return NULL;
+    if (!element) {
+        goto error;
+    }
 
     text = deepcopy(st, JOIN_OBJ(self->text), memo);
     if (!text)
@@ -895,10 +902,12 @@ _elementtree_Element___deepcopy___impl(ElementObject *self, PyObject *memo)
     if (i < 0)
         goto error;
 
+    _Py_LeaveRecursiveCall();
     return (PyObject*) element;
 
   error:
-    Py_DECREF(element);
+    _Py_LeaveRecursiveCall();
+    Py_XDECREF(element);
     return NULL;
 }
 
@@ -912,7 +921,7 @@ deepcopy(elementtreestate *st, PyObject *object, PyObject *memo)
         return Py_NewRef(object);
     }
 
-    if (Py_REFCNT(object) == 1) {
+    if (_PyObject_IsUniquelyReferenced(object)) {
         if (PyDict_CheckExact(object)) {
             PyObject *key, *value;
             Py_ssize_t pos = 0;
@@ -1341,9 +1350,9 @@ _elementtree_Element_findtext_impl(ElementObject *self, PyTypeObject *cls,
             PyObject *text = element_get_text((ElementObject *)item);
             Py_DECREF(item);
             if (text == Py_None) {
+                Py_DECREF(text);
                 return Py_GetConstant(Py_CONSTANT_EMPTY_STR);
             }
-            Py_XINCREF(text);
             return text;
         }
         Py_DECREF(item);
@@ -1806,15 +1815,19 @@ element_subscr(PyObject *op, PyObject *item)
         return element_getitem(op, i);
     }
     else if (PySlice_Check(item)) {
+        // Note: 'slicelen' is computed once we are sure that 'self->extra'
+        // cannot be mutated by user-defined code.
+        // See https://github.com/python/cpython/issues/143200.
         Py_ssize_t start, stop, step, slicelen, i;
         size_t cur;
         PyObject* list;
 
-        if (!self->extra)
-            return PyList_New(0);
-
         if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
             return NULL;
+        }
+
+        if (self->extra == NULL) {
+            return PyList_New(0);
         }
         slicelen = PySlice_AdjustIndices(self->extra->length, &start, &stop,
                                          step);
@@ -1858,28 +1871,26 @@ element_ass_subscr(PyObject *op, PyObject *item, PyObject *value)
         return element_setitem(op, i, value);
     }
     else if (PySlice_Check(item)) {
+        // Note: 'slicelen' is computed once we are sure that 'self->extra'
+        // cannot be mutated by user-defined code.
+        // See https://github.com/python/cpython/issues/143200.
         Py_ssize_t start, stop, step, slicelen, newlen, i;
         size_t cur;
 
         PyObject* recycle = NULL;
         PyObject* seq;
 
-        if (!self->extra) {
-            if (create_extra(self, NULL) < 0)
-                return -1;
-        }
-
         if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
             return -1;
         }
-        slicelen = PySlice_AdjustIndices(self->extra->length, &start, &stop,
-                                         step);
 
         if (value == NULL) {
             /* Delete slice */
-            size_t cur;
-            Py_ssize_t i;
-
+            if (self->extra == NULL) {
+                return 0;
+            }
+            slicelen = PySlice_AdjustIndices(self->extra->length, &start, &stop,
+                                             step);
             if (slicelen <= 0)
                 return 0;
 
@@ -1948,8 +1959,16 @@ element_ass_subscr(PyObject *op, PyObject *item, PyObject *value)
         }
         newlen = PySequence_Fast_GET_SIZE(seq);
 
-        if (step !=  1 && newlen != slicelen)
-        {
+        if (self->extra == NULL) {
+            if (create_extra(self, NULL) < 0) {
+                Py_DECREF(seq);
+                return -1;
+            }
+        }
+        slicelen = PySlice_AdjustIndices(self->extra->length, &start, &stop,
+                                         step);
+
+        if (step != 1 && newlen != slicelen) {
             Py_DECREF(seq);
             PyErr_Format(PyExc_ValueError,
                 "attempt to assign sequence of size %zd "
@@ -2037,16 +2056,14 @@ static PyObject*
 element_text_getter(PyObject *op, void *closure)
 {
     ElementObject *self = _Element_CAST(op);
-    PyObject *res = element_get_text(self);
-    return Py_XNewRef(res);
+    return element_get_text(self);
 }
 
 static PyObject*
 element_tail_getter(PyObject *op, void *closure)
 {
     ElementObject *self = _Element_CAST(op);
-    PyObject *res = element_get_tail(self);
-    return Py_XNewRef(res);
+    return element_get_tail(self);
 }
 
 static PyObject*
@@ -2272,6 +2289,10 @@ elementiter_next(PyObject *op)
             return NULL;
         }
         if (it->gettext) {
+            if (elem->tag != Py_None && !PyUnicode_Check(elem->tag)) {
+                Py_DECREF(elem);
+                continue;
+            }
             text = element_get_text(elem);
             goto gettext;
         }
@@ -2289,16 +2310,14 @@ elementiter_next(PyObject *op)
         continue;
 
 gettext:
+        Py_DECREF(elem);
         if (!text) {
-            Py_DECREF(elem);
             return NULL;
         }
         if (text == Py_None) {
-            Py_DECREF(elem);
+            Py_DECREF(text);
         }
         else {
-            Py_INCREF(text);
-            Py_DECREF(elem);
             rc = PyObject_IsTrue(text);
             if (rc > 0)
                 return text;
@@ -2794,8 +2813,9 @@ treebuilder_handle_data(TreeBuilderObject* self, PyObject* data)
         self->data = Py_NewRef(data);
     } else {
         /* more than one item; use a list to collect items */
-        if (PyBytes_CheckExact(self->data) && Py_REFCNT(self->data) == 1 &&
-            PyBytes_CheckExact(data) && PyBytes_GET_SIZE(data) == 1) {
+        if (PyBytes_CheckExact(self->data)
+            && _PyObject_IsUniquelyReferenced(self->data)
+            && PyBytes_CheckExact(data) && PyBytes_GET_SIZE(data) == 1) {
             /* XXX this code path unused in Python 3? */
             /* expat often generates single character data sections; handle
                the most common case by resizing the existing string... */
@@ -3708,8 +3728,12 @@ _elementtree_XMLParser___init___impl(XMLParserObject *self, PyObject *target,
         PyErr_NoMemory();
         return -1;
     }
-    /* expat < 2.1.0 has no XML_SetHashSalt() */
-    if (EXPAT(st, SetHashSalt) != NULL) {
+    // Prefer 16-byte entropy, only expat >= 2.8.0. See gh-149018
+    if (EXPAT(st, SetHashSalt16Bytes) != NULL) {
+        EXPAT(st, SetHashSalt16Bytes)(self->parser,
+                                      _Py_HashSecret.expat.hashsalt16);
+    }
+    else if (EXPAT(st, SetHashSalt) != NULL) {
         EXPAT(st, SetHashSalt)(self->parser,
                            (unsigned long)_Py_HashSecret.expat.hashsalt);
     }
@@ -3904,6 +3928,27 @@ expat_parse(elementtreestate *st, XMLParserObject *self, const char *data,
     Py_RETURN_NONE;
 }
 
+/* Expat takes the length as an int, feed larger data in chunks. */
+#define MAX_CHUNK_SIZE (1 << 20)
+
+LOCAL(PyObject*)
+expat_parse_large(elementtreestate *st, XMLParserObject *self,
+                  const char *data, Py_ssize_t data_len, int final)
+{
+    static_assert(MAX_CHUNK_SIZE <= INT_MAX,
+                  "MAX_CHUNK_SIZE is larger than INT_MAX");
+    while (data_len > MAX_CHUNK_SIZE) {
+        PyObject *res = expat_parse(st, self, data, MAX_CHUNK_SIZE, 0);
+        if (res == NULL) {
+            return NULL;
+        }
+        Py_DECREF(res);
+        data += MAX_CHUNK_SIZE;
+        data_len -= MAX_CHUNK_SIZE;
+    }
+    return expat_parse(st, self, data, (int)data_len, final);
+}
+
 /*[clinic input]
 _elementtree.XMLParser.close
 
@@ -3995,26 +4040,17 @@ _elementtree_XMLParser_feed_impl(XMLParserObject *self, PyObject *data)
         const char *data_ptr = PyUnicode_AsUTF8AndSize(data, &data_len);
         if (data_ptr == NULL)
             return NULL;
-        if (data_len > INT_MAX) {
-            PyErr_SetString(PyExc_OverflowError, "size does not fit in an int");
-            return NULL;
-        }
         /* Explicitly set UTF-8 encoding. Return code ignored. */
         (void)EXPAT(st, SetEncoding)(self->parser, "utf-8");
 
-        return expat_parse(st, self, data_ptr, (int)data_len, 0);
+        return expat_parse_large(st, self, data_ptr, data_len, 0);
     }
     else {
         Py_buffer view;
         PyObject *res;
         if (PyObject_GetBuffer(data, &view, PyBUF_SIMPLE) < 0)
             return NULL;
-        if (view.len > INT_MAX) {
-            PyBuffer_Release(&view);
-            PyErr_SetString(PyExc_OverflowError, "size does not fit in an int");
-            return NULL;
-        }
-        res = expat_parse(st, self, view.buf, (int)view.len, 0);
+        res = expat_parse_large(st, self, view.buf, view.len, 0);
         PyBuffer_Release(&view);
         return res;
     }
@@ -4048,6 +4084,7 @@ _elementtree_XMLParser__parse_whole_impl(XMLParserObject *self,
 
     /* read from open file object */
     elementtreestate *st = self->state;
+    int first = 1;
     for (;;) {
 
         buffer = PyObject_CallFunction(reader, "i", 64*1024);
@@ -4064,6 +4101,11 @@ _elementtree_XMLParser__parse_whole_impl(XMLParserObject *self,
                 Py_DECREF(buffer);
                 break;
             }
+            if (first) {
+                /* The text is already decoded, the encoding declared in the
+                   document does not apply to it.  Return code ignored. */
+                (void)EXPAT(st, SetEncoding)(self->parser, "utf-8");
+            }
             temp = PyUnicode_AsEncodedString(buffer, "utf-8", "surrogatepass");
             Py_DECREF(buffer);
             if (!temp) {
@@ -4078,15 +4120,10 @@ _elementtree_XMLParser__parse_whole_impl(XMLParserObject *self,
             break;
         }
 
-        if (PyBytes_GET_SIZE(buffer) > INT_MAX) {
-            Py_DECREF(buffer);
-            Py_DECREF(reader);
-            PyErr_SetString(PyExc_OverflowError, "size does not fit in an int");
-            return NULL;
-        }
-        res = expat_parse(
-            st, self, PyBytes_AS_STRING(buffer), (int)PyBytes_GET_SIZE(buffer),
+        res = expat_parse_large(
+            st, self, PyBytes_AS_STRING(buffer), PyBytes_GET_SIZE(buffer),
             0);
+        first = 0;
 
         Py_DECREF(buffer);
 
@@ -4214,8 +4251,8 @@ _elementtree_XMLParser__setevents_impl(XMLParserObject *self,
                 (XML_ProcessingInstructionHandler) expat_pi_handler
                 );
         } else {
-            Py_DECREF(events_seq);
             PyErr_Format(PyExc_ValueError, "unknown event '%s'", event_name);
+            Py_DECREF(events_seq);
             return NULL;
         }
     }

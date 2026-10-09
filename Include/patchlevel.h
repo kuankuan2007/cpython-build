@@ -19,12 +19,12 @@
 /*--start constants--*/
 #define PY_MAJOR_VERSION        3
 #define PY_MINOR_VERSION        14
-#define PY_MICRO_VERSION        0
-#define PY_RELEASE_LEVEL        PY_RELEASE_LEVEL_GAMMA
-#define PY_RELEASE_SERIAL       2
+#define PY_MICRO_VERSION        8
+#define PY_RELEASE_LEVEL        PY_RELEASE_LEVEL_FINAL
+#define PY_RELEASE_SERIAL       0
 
 /* Version as a string */
-#define PY_VERSION              "3.14.0rc2"
+#define PY_VERSION              "3.14.8"
 /*--end constants--*/
 
 

@@ -362,6 +362,12 @@ ptrace_enter_call(PyObject *self, void *key, PyObject *userObj)
     ProfilerEntry *profEntry;
     ProfilerContext *pContext;
 
+    /* Events raised by the external timer must be ignored: it can run
+       arbitrary code while a context is still being unwound. */
+    if (pObj->flags & POF_EXT_TIMER) {
+        return;
+    }
+
     /* In the case of entering a generator expression frame via a
      * throw (gen_send_ex(.., 1)), we may already have an
      * Exception set here. We must not mess around with this
@@ -403,6 +409,10 @@ ptrace_leave_call(PyObject *self, void *key)
     ProfilerObject *pObj = (ProfilerObject*)self;
     ProfilerEntry *profEntry;
     ProfilerContext *pContext;
+
+    if (pObj->flags & POF_EXT_TIMER) {
+        return;
+    }
 
     pContext = pObj->currentProfilerContext;
     if (pContext == NULL)
@@ -534,6 +544,7 @@ static int statsForEntry(rotating_node_t *node, void *arg)
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler.getstats
 
     cls: defining_class
@@ -565,7 +576,7 @@ profiler_subentry objects:
 
 static PyObject *
 _lsprof_Profiler_getstats_impl(ProfilerObject *self, PyTypeObject *cls)
-/*[clinic end generated code: output=1806ef720019ee03 input=445e193ef4522902]*/
+/*[clinic end generated code: output=1806ef720019ee03 input=3dc69eb85ed73d91]*/
 {
     statscollector_t collect;
     collect.state = _PyType_GetModuleState(cls);
@@ -613,6 +624,7 @@ setBuiltins(ProfilerObject *pObj, int nvalue)
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler._pystart_callback
 
     code: object
@@ -624,7 +636,7 @@ _lsprof.Profiler._pystart_callback
 static PyObject *
 _lsprof_Profiler__pystart_callback_impl(ProfilerObject *self, PyObject *code,
                                         PyObject *instruction_offset)
-/*[clinic end generated code: output=5fec8b7ad5ed25e8 input=b166e6953c579cda]*/
+/*[clinic end generated code: output=5fec8b7ad5ed25e8 input=b61a0e79cf1f8499]*/
 {
     ptrace_enter_call((PyObject*)self, (void *)code, code);
 
@@ -632,6 +644,7 @@ _lsprof_Profiler__pystart_callback_impl(ProfilerObject *self, PyObject *code,
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler._pythrow_callback
 
     code: object
@@ -645,7 +658,7 @@ static PyObject *
 _lsprof_Profiler__pythrow_callback_impl(ProfilerObject *self, PyObject *code,
                                         PyObject *instruction_offset,
                                         PyObject *exception)
-/*[clinic end generated code: output=0a32988919dfb94c input=fd728fc2c074f5e6]*/
+/*[clinic end generated code: output=0a32988919dfb94c input=60c7f272206d3758]*/
 {
     ptrace_enter_call((PyObject*)self, (void *)code, code);
 
@@ -653,6 +666,7 @@ _lsprof_Profiler__pythrow_callback_impl(ProfilerObject *self, PyObject *code,
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler._pyreturn_callback
 
     code: object
@@ -667,7 +681,7 @@ _lsprof_Profiler__pyreturn_callback_impl(ProfilerObject *self,
                                          PyObject *code,
                                          PyObject *instruction_offset,
                                          PyObject *retval)
-/*[clinic end generated code: output=9e2f6fc1b882c51e input=667ffaeb2fa6fd1f]*/
+/*[clinic end generated code: output=9e2f6fc1b882c51e input=0ddcc1ec53faa928]*/
 {
     ptrace_leave_call((PyObject*)self, (void *)code);
 
@@ -703,6 +717,7 @@ PyObject* get_cfunc_from_callable(PyObject* callable, PyObject* self_arg, PyObje
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler._ccall_callback
 
     code: object
@@ -717,7 +732,7 @@ static PyObject *
 _lsprof_Profiler__ccall_callback_impl(ProfilerObject *self, PyObject *code,
                                       PyObject *instruction_offset,
                                       PyObject *callable, PyObject *self_arg)
-/*[clinic end generated code: output=152db83cabd18cad input=0e66687cfb95c001]*/
+/*[clinic end generated code: output=152db83cabd18cad input=2fc1e0630ee5e32b]*/
 {
     if (self->flags & POF_BUILTINS) {
         PyObject* cfunc = get_cfunc_from_callable(callable, self_arg, self->missing);
@@ -733,6 +748,7 @@ _lsprof_Profiler__ccall_callback_impl(ProfilerObject *self, PyObject *code,
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler._creturn_callback
 
     code: object
@@ -748,7 +764,7 @@ _lsprof_Profiler__creturn_callback_impl(ProfilerObject *self, PyObject *code,
                                         PyObject *instruction_offset,
                                         PyObject *callable,
                                         PyObject *self_arg)
-/*[clinic end generated code: output=1e886dde8fed8fb0 input=b18afe023746923a]*/
+/*[clinic end generated code: output=1e886dde8fed8fb0 input=bdc246d6b5b8714a]*/
 {
     if (self->flags & POF_BUILTINS) {
         PyObject* cfunc = get_cfunc_from_callable(callable, self_arg, self->missing);
@@ -780,6 +796,7 @@ static const struct {
 
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler.enable
 
     subcalls: bool = True
@@ -796,7 +813,7 @@ Start collecting profiling information.
 static PyObject *
 _lsprof_Profiler_enable_impl(ProfilerObject *self, int subcalls,
                              int builtins)
-/*[clinic end generated code: output=1e747f9dc1edd571 input=9ab81405107ab7f1]*/
+/*[clinic end generated code: output=1e747f9dc1edd571 input=0b88115b1c796173]*/
 {
     int all_events = 0;
     if (setSubcalls(self, subcalls) < 0 || setBuiltins(self, builtins) < 0) {
@@ -812,7 +829,6 @@ _lsprof_Profiler_enable_impl(ProfilerObject *self, int subcalls,
                                           "use_tool_id", "is",
                                           self->tool_id, "cProfile");
     if (check == NULL) {
-        PyErr_Format(PyExc_ValueError, "Another profiling tool is already active");
         goto error;
     }
     Py_DECREF(check);
@@ -869,6 +885,7 @@ flush_unmatched(ProfilerObject *pObj)
 
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler.disable
 
 Stop collecting profiling information.
@@ -876,7 +893,7 @@ Stop collecting profiling information.
 
 static PyObject *
 _lsprof_Profiler_disable_impl(ProfilerObject *self)
-/*[clinic end generated code: output=838cffef7f651870 input=05700b3fc68d1f50]*/
+/*[clinic end generated code: output=838cffef7f651870 input=f7e4787cae20f7f6]*/
 {
     if (self->flags & POF_EXT_TIMER) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -928,6 +945,7 @@ _lsprof_Profiler_disable_impl(ProfilerObject *self)
 }
 
 /*[clinic input]
+@critical_section
 _lsprof.Profiler.clear
 
 Clear all profiling information collected so far.
@@ -935,7 +953,7 @@ Clear all profiling information collected so far.
 
 static PyObject *
 _lsprof_Profiler_clear_impl(ProfilerObject *self)
-/*[clinic end generated code: output=dd1c668fb84b1335 input=fbe1f88c28be4f98]*/
+/*[clinic end generated code: output=dd1c668fb84b1335 input=4aab219d5d7a9bec]*/
 {
     if (self->flags & POF_EXT_TIMER) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -968,9 +986,12 @@ profiler_dealloc(PyObject *op)
         }
     }
 
+    /* Drop the external timer before flushing: it is Python code, and the
+       profiler can be deallocated by the garbage collector. */
+    Py_CLEAR(self->externalTimer);
+
     flush_unmatched(self);
     clearEntries(self);
-    Py_XDECREF(self->externalTimer);
     PyTypeObject *tp = Py_TYPE(self);
     tp->tp_free(self);
     Py_DECREF(tp);

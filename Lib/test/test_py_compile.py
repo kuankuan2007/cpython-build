@@ -158,21 +158,24 @@ class PyCompileTestsBase:
     def test_double_dot_no_clobber(self):
         # http://bugs.python.org/issue22966
         # py_compile foo.bar.py -> __pycache__/foo.cpython-34.pyc
-        weird_path = os.path.join(self.directory, 'foo.bar.py')
-        cache_path = importlib.util.cache_from_source(weird_path)
-        pyc_path = weird_path + 'c'
-        head, tail = os.path.split(cache_path)
-        penultimate_tail = os.path.basename(head)
-        self.assertEqual(
-            os.path.join(penultimate_tail, tail),
-            os.path.join(
-                '__pycache__',
-                'foo.bar.{}.pyc'.format(sys.implementation.cache_tag)))
-        with open(weird_path, 'w') as file:
-            file.write('x = 123\n')
-        py_compile.compile(weird_path)
-        self.assertTrue(os.path.exists(cache_path))
-        self.assertFalse(os.path.exists(pyc_path))
+        # This test asserts the default __pycache__ layout, so neutralize any
+        # pycache prefix (e.g. when run with PYTHONPYCACHEPREFIX set).
+        with support.swap_attr(sys, 'pycache_prefix', None):
+            weird_path = os.path.join(self.directory, 'foo.bar.py')
+            cache_path = importlib.util.cache_from_source(weird_path)
+            pyc_path = weird_path + 'c'
+            head, tail = os.path.split(cache_path)
+            penultimate_tail = os.path.basename(head)
+            self.assertEqual(
+                os.path.join(penultimate_tail, tail),
+                os.path.join(
+                    '__pycache__',
+                    'foo.bar.{}.pyc'.format(sys.implementation.cache_tag)))
+            with open(weird_path, 'w') as file:
+                file.write('x = 123\n')
+            py_compile.compile(weird_path)
+            self.assertTrue(os.path.exists(cache_path))
+            self.assertFalse(os.path.exists(pyc_path))
 
     def test_optimization_path(self):
         # Specifying optimized bytecode should lead to a path reflecting that.
@@ -206,6 +209,14 @@ class PyCompileTestsBase:
             self.assertEqual(stderr.getvalue(), '')
             with self.assertRaises(py_compile.PyCompileError):
                 py_compile.compile(bad_coding, doraise=True, quiet=1)
+
+    def test_utf7_decoded_cr_compiles(self):
+        with open(self.source_path, 'wb') as file:
+            file.write(b"#coding=U7+AA0''\n")
+
+        pyc_path = py_compile.compile(self.source_path, self.pyc_path, doraise=True)
+        self.assertEqual(pyc_path, self.pyc_path)
+        self.assertTrue(os.path.exists(self.pyc_path))
 
 
 class PyCompileTestsWithSourceEpoch(PyCompileTestsBase,
@@ -263,7 +274,13 @@ class PyCompileCLITestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(stdout, b'')
         self.assertEqual(stderr, b'')
-        self.assertTrue(os.path.exists(self.cache_path))
+        # pycompilecmd() runs the interpreter in isolated mode (-I), which
+        # ignores PYTHONPYCACHEPREFIX, so the bytecode is written next to the
+        # source.  Compute the expected cache path the same way.
+        with support.swap_attr(sys, 'pycache_prefix', None):
+            cache_path = importlib.util.cache_from_source(
+                self.source_path, optimization='' if __debug__ else 1)
+        self.assertTrue(os.path.exists(cache_path))
 
     def test_bad_syntax(self):
         bad_syntax = os.path.join(os.path.dirname(__file__),

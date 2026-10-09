@@ -508,7 +508,6 @@ deque_extend_impl(dequeobject *deque, PyObject *iterable)
     iternext = *Py_TYPE(it)->tp_iternext;
     while ((item = iternext(it)) != NULL) {
         if (deque_append_lock_held(deque, item, maxlen) == -1) {
-            Py_DECREF(item);
             Py_DECREF(it);
             return NULL;
         }
@@ -605,29 +604,42 @@ deque_copy_impl(dequeobject *deque)
     collections_state *state = find_module_state_by_def(Py_TYPE(deque));
     if (Py_IS_TYPE(deque, state->deque_type)) {
         dequeobject *new_deque;
-        PyObject *rv;
+        Py_ssize_t n = Py_SIZE(deque);
 
         new_deque = (dequeobject *)deque_new(state->deque_type, NULL, NULL);
         if (new_deque == NULL)
             return NULL;
         new_deque->maxlen = old_deque->maxlen;
-        /* Fast path for the deque_repeat() common case where len(deque) == 1
-         *
-         * It's safe to not acquire the per-object lock for new_deque; it's
-         * invisible to other threads.
+
+        /* Copy elements directly by walking the block structure.
+         * This is safe because the caller holds the deque lock and
+         * the new deque is not yet visible to other threads.
          */
-        if (Py_SIZE(deque) == 1) {
-            PyObject *item = old_deque->leftblock->data[old_deque->leftindex];
-            rv = deque_append_impl(new_deque, item);
-        } else {
-            rv = deque_extend_impl(new_deque, (PyObject *)deque);
+        if (n > 0) {
+            block *b = old_deque->leftblock;
+            Py_ssize_t index = old_deque->leftindex;
+
+            /* Space saving heuristic.  Start filling from the left */
+            assert(new_deque->leftblock == new_deque->rightblock);
+            assert(new_deque->leftindex == new_deque->rightindex + 1);
+            new_deque->leftindex = 1;
+            new_deque->rightindex = 0;
+
+            for (Py_ssize_t i = 0; i < n; i++) {
+                PyObject *item = b->data[index];
+                if (deque_append_lock_held(new_deque, Py_NewRef(item),
+                                           new_deque->maxlen) < 0) {
+                    Py_DECREF(new_deque);
+                    return NULL;
+                }
+                index++;
+                if (index == BLOCKLEN) {
+                    b = b->rightlink;
+                    index = 0;
+                }
+            }
         }
-        if (rv != NULL) {
-            Py_DECREF(rv);
-            return (PyObject *)new_deque;
-        }
-        Py_DECREF(new_deque);
-        return NULL;
+        return (PyObject *)new_deque;
     }
     if (old_deque->maxlen < 0)
         result = PyObject_CallOneArg((PyObject *)(Py_TYPE(deque)),
@@ -1234,7 +1246,7 @@ _collections.deque.index as deque_index
     deque: dequeobject
     value as v: object
     start: object(converter='_PyEval_SliceIndexNotNone', type='Py_ssize_t', c_default='0') = NULL
-    stop: object(converter='_PyEval_SliceIndexNotNone', type='Py_ssize_t', c_default='Py_SIZE(deque)') = NULL
+    stop: object(converter='_PyEval_SliceIndexNotNone', type='Py_ssize_t', c_default='PY_SSIZE_T_MAX') = NULL
     /
 
 Return first index of value.
@@ -1245,7 +1257,7 @@ Raises ValueError if the value is not present.
 static PyObject *
 deque_index_impl(dequeobject *deque, PyObject *v, Py_ssize_t start,
                  Py_ssize_t stop)
-/*[clinic end generated code: output=df45132753175ef9 input=90f48833a91e1743]*/
+/*[clinic end generated code: output=df45132753175ef9 input=1c3b19632cf3484f]*/
 {
     Py_ssize_t i, n;
     PyObject *item;
@@ -1253,22 +1265,23 @@ deque_index_impl(dequeobject *deque, PyObject *v, Py_ssize_t start,
     Py_ssize_t index = deque->leftindex;
     size_t start_state = deque->state;
     int cmp;
+    Py_ssize_t size = Py_SIZE(deque);
 
     if (start < 0) {
-        start += Py_SIZE(deque);
+        start += size;
         if (start < 0)
             start = 0;
     }
     if (stop < 0) {
-        stop += Py_SIZE(deque);
+        stop += size;
         if (stop < 0)
             stop = 0;
     }
-    if (stop > Py_SIZE(deque))
-        stop = Py_SIZE(deque);
+    if (stop > size)
+        stop = size;
     if (start > stop)
         start = stop;
-    assert(0 <= start && start <= stop && stop <= Py_SIZE(deque));
+    assert(0 <= start && start <= stop && stop <= size);
 
     for (i=0 ; i < start - BLOCKLEN ; i += BLOCKLEN) {
         b = b->rightlink;
@@ -1838,7 +1851,7 @@ static PyMethodDef deque_methods[] = {
     DEQUE_ROTATE_METHODDEF
     DEQUE___SIZEOF___METHODDEF
     {"__class_getitem__",       Py_GenericAlias,
-        METH_O|METH_CLASS,       PyDoc_STR("See PEP 585")},
+    METH_O|METH_CLASS,          PyDoc_STR("deques are generic over the type of their contents")},
     {NULL,              NULL}   /* sentinel */
 };
 
@@ -2231,11 +2244,11 @@ defdict_missing(PyObject *op, PyObject *key)
     value = _PyObject_CallNoArgs(factory);
     if (value == NULL)
         return value;
-    if (PyObject_SetItem(op, key, value) < 0) {
-        Py_DECREF(value);
-        return NULL;
-    }
-    return value;
+    PyObject *result = NULL;
+    (void)PyDict_SetDefaultRef(op, key, value, &result);
+    // 'result' is NULL, or a strong reference to 'value' or 'op[key]'
+    Py_DECREF(value);
+    return result;
 }
 
 static inline PyObject*
@@ -2314,6 +2327,12 @@ defdict_reduce(PyObject *op, PyObject *Py_UNUSED(dummy))
     return result;
 }
 
+
+PyDoc_STRVAR(defdict_class_getitem_doc,
+"defaultdicts are generic over two types, signifying (respectively) the types \
+of the dictionary's keys and values");
+
+
 static PyMethodDef defdict_methods[] = {
     {"__missing__", defdict_missing, METH_O,
      defdict_missing_doc},
@@ -2324,7 +2343,7 @@ static PyMethodDef defdict_methods[] = {
     {"__reduce__", defdict_reduce, METH_NOARGS,
      reduce_doc},
     {"__class_getitem__", Py_GenericAlias, METH_O|METH_CLASS,
-     PyDoc_STR("See PEP 585")},
+     defdict_class_getitem_doc},
     {NULL}
 };
 
@@ -2369,9 +2388,10 @@ defdict_repr(PyObject *op)
             }
             defrepr = PyUnicode_FromString("...");
         }
-        else
+        else {
             defrepr = PyObject_Repr(dd->default_factory);
-        Py_ReprLeave(dd->default_factory);
+            Py_ReprLeave(dd->default_factory);
+        }
     }
     if (defrepr == NULL) {
         Py_DECREF(baserepr);
@@ -2577,7 +2597,12 @@ _collections__count_elements_impl(PyObject *module, PyObject *mapping,
                 if (_PyDict_SetItem_KnownHash(mapping, key, one, hash) < 0)
                     goto done;
             } else {
+                /* oldval is a borrowed reference.  Keep it alive across
+                   PyNumber_Add(), which can execute arbitrary user code and
+                   mutate (or even clear) the underlying dict. */
+                Py_INCREF(oldval);
                 newval = PyNumber_Add(oldval, one);
+                Py_DECREF(oldval);
                 if (newval == NULL)
                     goto done;
                 if (_PyDict_SetItem_KnownHash(mapping, key, newval, hash) < 0)

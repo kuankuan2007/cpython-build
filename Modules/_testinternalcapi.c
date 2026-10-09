@@ -125,6 +125,18 @@ get_c_recursion_remaining(PyObject *self, PyObject *Py_UNUSED(args))
     return PyLong_FromLong(remaining);
 }
 
+static PyObject*
+get_stack_pointer(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    uintptr_t here_addr = _Py_get_machine_stack_pointer();
+    return PyLong_FromSize_t(here_addr);
+}
+
+static PyObject*
+get_stack_margin(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    return PyLong_FromSize_t(_PyOS_STACK_MARGIN_BYTES);
+}
 
 static PyObject*
 test_bswap(PyObject *self, PyObject *Py_UNUSED(args))
@@ -132,14 +144,14 @@ test_bswap(PyObject *self, PyObject *Py_UNUSED(args))
     uint16_t u16 = _Py_bswap16(UINT16_C(0x3412));
     if (u16 != UINT16_C(0x1234)) {
         PyErr_Format(PyExc_AssertionError,
-                     "_Py_bswap16(0x3412) returns %u", u16);
+                     "_Py_bswap16(0x3412) returns %d", u16);
         return NULL;
     }
 
     uint32_t u32 = _Py_bswap32(UINT32_C(0x78563412));
     if (u32 != UINT32_C(0x12345678)) {
         PyErr_Format(PyExc_AssertionError,
-                     "_Py_bswap32(0x78563412) returns %lu", u32);
+                     "_Py_bswap32(0x78563412) returns %u", u32);
         return NULL;
     }
 
@@ -418,7 +430,7 @@ test_edit_cost(PyObject *self, PyObject *Py_UNUSED(args))
 
 static int
 check_bytes_find(const char *haystack0, const char *needle0,
-                 int offset, Py_ssize_t expected)
+                 Py_ssize_t offset, Py_ssize_t expected)
 {
     Py_ssize_t len_haystack = strlen(haystack0);
     Py_ssize_t len_needle = strlen(needle0);
@@ -720,13 +732,17 @@ _testinternalcapi.compiler_codegen -> object
   compile_mode: int = 0
 
 Apply compiler code generation to an AST.
+
+Return (instruction_sequence, metadata).  metadata maps "argcount",
+"posonlyargcount", "kwonlyargcount" to ints and "consts" to the list of
+constants in LOAD_CONST index order (for use with optimize_cfg).
 [clinic start generated code]*/
 
 static PyObject *
 _testinternalcapi_compiler_codegen_impl(PyObject *module, PyObject *ast,
                                         PyObject *filename, int optimize,
                                         int compile_mode)
-/*[clinic end generated code: output=40a68f6e13951cc8 input=a0e00784f1517cd7]*/
+/*[clinic end generated code: output=40a68f6e13951cc8 input=e0c65e5c80efe30e]*/
 {
     PyCompilerFlags *flags = NULL;
     return _PyCompile_CodeGen(ast, filename, flags, optimize, compile_mode);
@@ -742,12 +758,15 @@ _testinternalcapi.optimize_cfg -> object
   nlocals: int
 
 Apply compiler optimizations to an instruction list.
+
+consts must be a list aligned with LOAD_CONST opargs (the "consts" entry
+from the metadata dict returned by compiler_codegen for the same unit).
 [clinic start generated code]*/
 
 static PyObject *
 _testinternalcapi_optimize_cfg_impl(PyObject *module, PyObject *instructions,
                                     PyObject *consts, int nlocals)
-/*[clinic end generated code: output=57c53c3a3dfd1df0 input=6a96d1926d58d7e5]*/
+/*[clinic end generated code: output=57c53c3a3dfd1df0 input=905c3d935e063b27]*/
 {
     return _PyCompile_OptimizeCfg(instructions, consts, nlocals);
 }
@@ -836,7 +855,7 @@ get_interp_settings(PyObject *self, PyObject *args)
     }
     else {
         PyErr_Format(PyExc_NotImplementedError,
-                     "%zd", interpid);
+                     "%d", interpid);
         return NULL;
     }
     assert(interp != NULL);
@@ -1338,7 +1357,7 @@ pending_identify(PyObject *self, PyObject *args)
 
     PyThread_type_lock mutex = PyThread_allocate_lock();
     if (mutex == NULL) {
-        return NULL;
+        return PyErr_NoMemory();
     }
     PyThread_acquire_lock(mutex, WAIT_LOCK);
     /* It gets released in _pending_identify_callback(). */
@@ -2238,6 +2257,13 @@ get_tlbc_id(PyObject *Py_UNUSED(module), PyObject *obj)
     }
     return PyLong_FromVoidPtr(bc);
 }
+
+static PyObject *
+get_long_lived_total(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyLong_FromInt64(PyInterpreterState_Get()->gc.long_lived_total);
+}
+
 #endif
 
 static PyObject *
@@ -2377,10 +2403,97 @@ emscripten_set_up_async_input_device(PyObject *self, PyObject *Py_UNUSED(ignored
 }
 #endif
 
+static PyObject *
+vectorcall_nop(PyObject *callable, PyObject *const *args,
+               size_t nargsf, PyObject *kwnames)
+{
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+set_vectorcall_nop(PyObject *self, PyObject *func)
+{
+    if (!PyFunction_Check(func)) {
+        PyErr_SetString(PyExc_TypeError, "expected function");
+        return NULL;
+    }
+
+    ((PyFunctionObject*)func)->vectorcall = vectorcall_nop;
+    Py_RETURN_NONE;
+}
+
+
+static void
+check_threadstate_set_stack_protection(PyThreadState *tstate,
+                                       void *start, size_t size)
+{
+    assert(PyUnstable_ThreadState_SetStackProtection(tstate, start, size) == 0);
+    assert(!PyErr_Occurred());
+
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate;
+    assert(ts->c_stack_top == (uintptr_t)start + size);
+    assert(ts->c_stack_hard_limit <= ts->c_stack_soft_limit);
+    assert(ts->c_stack_soft_limit < ts->c_stack_top);
+}
+
+
+static PyObject *
+test_threadstate_set_stack_protection(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    PyThreadState *tstate = PyThreadState_GET();
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate;
+    assert(!PyErr_Occurred());
+
+    uintptr_t init_base = ts->c_stack_init_base;
+    size_t init_top = ts->c_stack_init_top;
+
+    // Test the minimum stack size
+    size_t size = _PyOS_MIN_STACK_SIZE;
+    void *start = (void*)(_Py_get_machine_stack_pointer() - size);
+    check_threadstate_set_stack_protection(tstate, start, size);
+
+    // Test a larger size
+    size = 7654321;
+    assert(size > _PyOS_MIN_STACK_SIZE);
+    start = (void*)(_Py_get_machine_stack_pointer() - size);
+    check_threadstate_set_stack_protection(tstate, start, size);
+
+    // Test invalid size (too small)
+    size = 5;
+    start = (void*)(_Py_get_machine_stack_pointer() - size);
+    assert(PyUnstable_ThreadState_SetStackProtection(tstate, start, size) == -1);
+    assert(PyErr_ExceptionMatches(PyExc_ValueError));
+    PyErr_Clear();
+
+    // Test PyUnstable_ThreadState_ResetStackProtection()
+    PyUnstable_ThreadState_ResetStackProtection(tstate);
+    assert(ts->c_stack_init_base == init_base);
+    assert(ts->c_stack_init_top == init_top);
+
+    Py_RETURN_NONE;
+}
+
+
+static PyObject *
+_pyerr_setkeyerror(PyObject *self, PyObject *arg)
+{
+    // Test that _PyErr_SetKeyError() overrides the current exception
+    // if an exception is set
+    PyErr_NoMemory();
+
+    _PyErr_SetKeyError(arg);
+
+    assert(PyErr_Occurred());
+    return NULL;
+}
+
+
 static PyMethodDef module_functions[] = {
     {"get_configs", get_configs, METH_NOARGS},
     {"get_recursion_depth", get_recursion_depth, METH_NOARGS},
     {"get_c_recursion_remaining", get_c_recursion_remaining, METH_NOARGS},
+    {"get_stack_pointer", get_stack_pointer, METH_NOARGS},
+    {"get_stack_margin", get_stack_margin, METH_NOARGS},
     {"test_bswap", test_bswap, METH_NOARGS},
     {"test_popcount", test_popcount, METH_NOARGS},
     {"test_bit_length", test_bit_length, METH_NOARGS},
@@ -2467,6 +2580,7 @@ static PyMethodDef module_functions[] = {
     {"py_thread_id", get_py_thread_id, METH_NOARGS},
     {"get_tlbc", get_tlbc, METH_O, NULL},
     {"get_tlbc_id", get_tlbc_id, METH_O, NULL},
+    {"get_long_lived_total", get_long_lived_total, METH_NOARGS},
 #endif
 #ifdef _Py_TIER2
     {"uop_symbols_test", _Py_uop_symbols_test, METH_NOARGS},
@@ -2482,6 +2596,10 @@ static PyMethodDef module_functions[] = {
 #ifdef __EMSCRIPTEN__
     {"emscripten_set_up_async_input_device", emscripten_set_up_async_input_device, METH_NOARGS},
 #endif
+    {"set_vectorcall_nop", set_vectorcall_nop, METH_O},
+    {"test_threadstate_set_stack_protection",
+     test_threadstate_set_stack_protection, METH_NOARGS},
+    {"_pyerr_setkeyerror", _pyerr_setkeyerror, METH_O},
     {NULL, NULL} /* sentinel */
 };
 

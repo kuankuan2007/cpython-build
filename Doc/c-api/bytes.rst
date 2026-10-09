@@ -8,6 +8,13 @@ Bytes Objects
 These functions raise :exc:`TypeError` when expecting a bytes parameter and
 called with a non-bytes parameter.
 
+.. impl-detail::
+
+   The internal buffer of :c:type:`PyBytesObject` always includes an extra
+   trailing null byte for compatibility with null terminated C strings.
+   This extra byte is not counted in :c:func:`PyBytes_Size` nor in the
+   various *length* and *size* arguments of the functions below.
+
 .. index:: pair: object; bytes
 
 
@@ -123,6 +130,10 @@ called with a non-bytes parameter.
    Return the bytes representation of object *o* that implements the buffer
    protocol.
 
+   .. note::
+      If the object implements the buffer protocol, then the buffer
+      must not be mutated while the bytes object is being created.
+
 
 .. c:function:: Py_ssize_t PyBytes_Size(PyObject *o)
 
@@ -176,17 +187,25 @@ called with a non-bytes parameter.
 .. c:function:: void PyBytes_Concat(PyObject **bytes, PyObject *newpart)
 
    Create a new bytes object in *\*bytes* containing the contents of *newpart*
-   appended to *bytes*; the caller will own the new reference.  The reference to
-   the old value of *bytes* will be stolen.  If the new object cannot be
-   created, the old reference to *bytes* will still be discarded and the value
-   of *\*bytes* will be set to ``NULL``; the appropriate exception will be set.
+   appended to *bytes*; the caller will own the new reference.
+   The reference to the old value of *bytes* will be ":term:`stolen <steal>`".
+   If the new object cannot be created, the old reference to *bytes* will still
+   be "stolen", the value of *\*bytes* will be set to ``NULL``, and
+   the appropriate exception will be set.
 
+   .. note::
+      If *newpart* implements the buffer protocol, then the buffer
+      must not be mutated while the new bytes object is being created.
 
 .. c:function:: void PyBytes_ConcatAndDel(PyObject **bytes, PyObject *newpart)
 
    Create a new bytes object in *\*bytes* containing the contents of *newpart*
    appended to *bytes*.  This version releases the :term:`strong reference`
    to *newpart* (i.e. decrements its reference count).
+
+   .. note::
+      If *newpart* implements the buffer protocol, then the buffer
+      must not be mutated while the new bytes object is being created.
 
 
 .. c:function:: PyObject* PyBytes_Join(PyObject *sep, PyObject *iterable)
@@ -206,6 +225,9 @@ called with a non-bytes parameter.
 
    .. versionadded:: 3.14
 
+   .. note::
+      If *iterable* objects implement the buffer protocol, then the buffers
+      must not be mutated while the new bytes object is being created.
 
 .. c:function:: int _PyBytes_Resize(PyObject **bytes, Py_ssize_t newsize)
 
@@ -219,3 +241,38 @@ called with a non-bytes parameter.
    reallocation fails, the original bytes object at *\*bytes* is deallocated,
    *\*bytes* is set to ``NULL``, :exc:`MemoryError` is set, and ``-1`` is
    returned.
+
+
+.. c:function:: PyObject *PyBytes_Repr(PyObject *bytes, int smartquotes)
+
+   Get the string representation of *bytes*. This function is currently used to
+   implement :meth:`!bytes.__repr__` in Python.
+
+   This function does not do type checking; it is undefined behavior to pass
+   *bytes* as a non-bytes object or ``NULL``.
+
+   If *smartquotes* is true, the representation will use a double-quoted string
+   instead of single-quoted string when single-quotes are present in *bytes*.
+   For example, the byte string ``'Python'`` would be represented as
+   ``b"'Python'"`` when *smartquotes* is true, or ``b'\'Python\''`` when it is
+   false.
+
+   On success, this function returns a :term:`strong reference` to a
+   :class:`str` object containing the representation. On failure, this
+   returns ``NULL`` with an exception set.
+
+
+.. c:function:: PyObject *PyBytes_DecodeEscape(const char *s, Py_ssize_t len, const char *errors, Py_ssize_t unicode, const char *recode_encoding)
+
+   Unescape a backslash-escaped string *s*. *s* must not be ``NULL``.
+   *len* must be the size of *s*.
+
+   *errors* must be one of ``"strict"``, ``"replace"``, or ``"ignore"``. If
+   *errors* is ``NULL``, then ``"strict"`` is used by default.
+
+   On success, this function returns a :term:`strong reference` to a Python
+   :class:`bytes` object containing the unescaped string. On failure, this
+   function returns ``NULL`` with an exception set.
+
+   .. versionchanged:: 3.9
+      *unicode* and *recode_encoding* are now unused.
